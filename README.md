@@ -145,22 +145,290 @@ thus influencing the final configuration that the machine will take.
 
 ## Installation
 
-The package can be installed
-by adding `ex_statemachine` to your list of dependencies in `mix.exs`:
+The package can be installed by adding `ex_machine` to your list of dependencies in `mix.exs`:
 
 ```elixir
 def deps do
   [
-    {:ex_statemachine, "~> 0.1.0"}
+    {:ex_machine, "~> 0.1.2"}
   ]
 end
 ```
 
 ## Usage
 
-```elixir
+ExMachine provides two main ways to use state machines:
 
+1. **Functional approach**: Direct function calls
+2. **Process-based approach**: Using GenServer integration
+
+### Basic Example: Simple Traffic Light
+
+```elixir
+defmodule TrafficLight do
+  use ExMachine.Statechart
+
+  alias ExMachine.{State, Transition}
+
+  def definition do
+    %State{
+      initial: "red",
+      substates: %{
+        "red" => %State{
+          entry: fn context ->
+            IO.puts("🔴 Red light - STOP")
+            context
+          end,
+          transitions: %{
+            "timer" => "green"
+          }
+        },
+        "green" => %State{
+          entry: fn context ->
+            IO.puts("🟢 Green light - GO")
+            context
+          end,
+          transitions: %{
+            "timer" => "yellow"
+          }
+        },
+        "yellow" => %State{
+          entry: fn context ->
+            IO.puts("🟡 Yellow light - CAUTION")
+            context
+          end,
+          transitions: %{
+            "timer" => "red"
+          }
+        }
+      }
+    }
+  end
+end
+
+# Usage
+alias ExMachine.{Machine, Statechart}
+
+# Create and initialize the machine
+statechart = Statechart.build(TrafficLight.definition())
+machine = Machine.init(statechart, %{})
+
+# Send events to transition between states
+machine = Machine.dispatch(machine, "timer")  # red -> green
+machine = Machine.dispatch(machine, "timer")  # green -> yellow
+machine = Machine.dispatch(machine, "timer")  # yellow -> red
 ```
+
+### Advanced Example: User Authentication Flow
+
+```elixir
+defmodule UserAuth do
+  use ExMachine.Statechart
+
+  alias ExMachine.{State, Transition, Final}
+
+  def definition do
+    %State{
+      initial: "logged_out",
+      substates: %{
+        "logged_out" => %State{
+          transitions: %{
+            "login_attempt" => "checking_credentials"
+          }
+        },
+        "checking_credentials" => %State{
+          transitions: %{
+            "success" => %Transition{
+              target: "logged_in",
+              action: &log_successful_login/1
+            },
+            "failure" => %Transition{
+              target: "login_failed",
+              action: &increment_attempts/1
+            }
+          }
+        },
+        "login_failed" => %State{
+          transitions: %{
+            "retry" => %Transition{
+              target: "logged_out",
+              guard: &can_retry?/1
+            },
+            "retry" => "locked"  # If guard fails
+          }
+        },
+        "locked" => %State{
+          entry: &set_lock_time/1
+        },
+        "logged_in" => %State{
+          entry: &clear_attempts/1,
+          transitions: %{
+            "logout" => "logged_out",
+            "session_timeout" => "logged_out"
+          }
+        }
+      }
+    }
+  end
+
+  # Action functions
+  defp log_successful_login(context) do
+    context
+    |> Map.put(:last_login, DateTime.utc_now())
+    |> Map.put(:attempts, 0)
+  end
+
+  defp increment_attempts(context) do
+    Map.update(context, :attempts, 1, &(&1 + 1))
+  end
+
+  defp clear_attempts(context) do
+    Map.put(context, :attempts, 0)
+  end
+
+  defp set_lock_time(context) do
+    Map.put(context, :locked_at, DateTime.utc_now())
+  end
+
+  # Guard functions
+  defp can_retry?(context) do
+    Map.get(context, :attempts, 0) < 3
+  end
+end
+
+# Usage example
+statechart = Statechart.build(UserAuth.definition())
+machine = Machine.init(statechart, %{attempts: 0})
+
+# Simulate authentication flow
+machine = Machine.dispatch(machine, "login_attempt")
+machine = Machine.dispatch(machine, "failure")      # First failure
+machine = Machine.dispatch(machine, "retry")
+machine = Machine.dispatch(machine, "login_attempt")
+machine = Machine.dispatch(machine, "success")      # Success!
+
+IO.inspect(machine.configuration)  # [["logged_in", "root"]]
+IO.inspect(machine.context)        # %{attempts: 0, last_login: ~U[...]}
+```
+
+### Hierarchical States Example: Media Player
+
+```elixir
+defmodule MediaPlayer do
+  use ExMachine.Statechart
+
+  alias ExMachine.{State, Transition, Final}
+
+  def definition do
+    %State{
+      initial: "stopped",
+      substates: %{
+        "stopped" => %State{
+          transitions: %{
+            "play" => "playing"
+          }
+        },
+        "playing" => %State{
+          initial: "normal_speed",
+          entry: &start_playback/1,
+          exit: &pause_playback/1,
+          substates: %{
+            "normal_speed" => %State{
+              transitions: %{
+                "fast_forward" => "fast_forwarding",
+                "rewind" => "rewinding"
+              }
+            },
+            "fast_forwarding" => %State{
+              entry: &set_speed_2x/1,
+              transitions: %{
+                "normal" => "normal_speed"
+              }
+            },
+            "rewinding" => %State{
+              entry: &set_speed_reverse/1,
+              transitions: %{
+                "normal" => "normal_speed"
+              }
+            }
+          },
+          transitions: %{
+            "pause" => "paused",
+            "stop" => "stopped"
+          }
+        },
+        "paused" => %State{
+          transitions: %{
+            "play" => "playing",
+            "stop" => "stopped"
+          }
+        }
+      }
+    }
+  end
+
+  # Action functions
+  defp start_playback(context), do: Map.put(context, :status, :playing)
+  defp pause_playback(context), do: Map.put(context, :status, :paused)
+  defp set_speed_2x(context), do: Map.put(context, :speed, 2.0)
+  defp set_speed_reverse(context), do: Map.put(context, :speed, -1.0)
+end
+```
+
+### Using with GenServer
+
+For long-running state machines, you can wrap them in a GenServer:
+
+```elixir
+defmodule PlayerServer do
+  use GenServer
+  alias ExMachine.{Machine, Statechart}
+
+  def start_link(opts \\ []) do
+    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+  end
+
+  def play, do: GenServer.cast(__MODULE__, {:event, "play"})
+  def pause, do: GenServer.cast(__MODULE__, {:event, "pause"})
+  def stop, do: GenServer.cast(__MODULE__, {:event, "stop"})
+
+  def get_state, do: GenServer.call(__MODULE__, :get_state)
+
+  @impl true
+  def init(_opts) do
+    statechart = Statechart.build(MediaPlayer.definition())
+    machine = Machine.init(statechart, %{})
+    {:ok, machine}
+  end
+
+  @impl true
+  def handle_cast({:event, event}, machine) do
+    new_machine = Machine.dispatch(machine, event)
+    {:noreply, new_machine}
+  end
+
+  @impl true
+  def handle_call(:get_state, _from, machine) do
+    {:reply, machine.configuration, machine}
+  end
+end
+
+# Usage
+{:ok, _pid} = PlayerServer.start_link()
+PlayerServer.play()
+PlayerServer.get_state()  # [["normal_speed", "playing", "root"]]
+```
+
+### Key Concepts
+
+- **States**: Define the possible states your machine can be in
+- **Transitions**: Define how to move between states based on events
+- **Actions**: Functions that modify the context during transitions
+- **Guards**: Functions that conditionally allow or prevent transitions
+- **Context**: The extended state that travels with your machine
+- **Events**: Messages that trigger state transitions
+
+For more examples, check the `lib/samples/` directory in the repository.
 
 ## Curiosity
 

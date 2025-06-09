@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3] - 2025-06-09
+
+### Added
+
+- Comprehensive internal documentation for all ExMachine modules
+- Detailed module documentation with practical examples for:
+  - `ExMachine.State` - Hierarchical state definitions with best practices
+  - `ExMachine.Final` - Final state usage and examples
+  - `ExMachine.History` - History state types (shallow/deep) with media player example
+  - `ExMachine.Context` - Context management utilities with complete API documentation
+  - `ExMachine.Macrostep` - Macrostep execution tracing with debugging examples
+  - `ExMachine.Microstep` - Atomic step documentation with state lifecycle details
+  - `ExMachine.ServerMachine` - GenServer-based statechart execution (placeholder implementation)
+
+### Improved
+
+- Enhanced code examples throughout the documentation
+- Better type specifications and function documentation
+- Improved module organization and cross-references
+- Added debugging and monitoring guidance
+
 ## [0.1.2] - 2025-06-09
 
 ### Changed

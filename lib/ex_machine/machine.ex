@@ -1,4 +1,57 @@
 defmodule ExMachine.Machine do
+  @moduledoc """
+  Core module for state machine execution and management.
+
+  The `Machine` module represents a running state machine instance. It maintains the current
+  state configuration, context data, execution history, and provides the core execution engine
+  for processing events and managing state transitions.
+
+  ## Machine Structure
+
+  A machine contains:
+
+  - `statechart` - The compiled state machine definition
+  - `configuration` - Current active states (hierarchical paths)
+  - `running?` - Whether the machine is currently running
+  - `macrosteps` - History of transition sequences  
+  - `queue` - Queue of internal events to process
+  - `context` - Extended state data that travels with the machine
+  - `states_histories` - History states for complex statecharts
+
+  ## State Configuration
+
+  Unlike simple finite state machines, a statechart machine can be in multiple states
+  simultaneously due to hierarchical composition. The configuration represents all
+  currently active states as a list of state paths from leaf states to the root.
+
+  For example, if a machine is in state "playing/normal_speed", the configuration
+  would be `[["normal_speed", "playing", "root"]]`.
+
+  ## Event Processing
+
+  Events are processed using run-to-completion semantics:
+
+  1. An external event is received
+  2. All possible transitions are evaluated
+  3. Actions are executed and may generate internal events  
+  4. Internal events are processed until no more transitions are possible
+  5. The machine reaches a stable configuration
+
+  ## Examples
+
+      # Initialize a machine
+      statechart = Statechart.build(MyMachine.definition())
+      machine = Machine.init(statechart, %{counter: 0})
+      
+      # Process events
+      machine = Machine.dispatch(machine, "start")
+      machine = Machine.dispatch(machine, "increment")
+      
+      # Check current state
+      IO.inspect(machine.configuration)
+      IO.inspect(machine.context)
+
+  """
   alias ExMachine.{Statechart, Macrostep, Microstep, Context}
 
   @type t :: %__MODULE__{

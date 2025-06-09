@@ -1,24 +1,82 @@
 defmodule ExMachine.Statechart do
   @moduledoc """
-  Statechart is the internal struct powering the state machine and provides
-  base function to compile a statechart.
+  Module for building and validating statechart definitions.
 
-  A statechart is builded passing a valid defined State struct to the
-  the `build/1` function.
+  A Statechart is a compiled representation of a hierarchical state machine definition.
+  It provides the foundation for creating and running state machines with complex
+  hierarchical structures, transitions, actions, and guards.
 
-  * `states`: a map of all the states in the statechart
-  * `configuration`: the active configuration (the current state of the machine)
-  when the statechart is running
-  * `running`: `true` if the statechart is started
-  * `macrosteps`: a list of `Macrostep` struct representing the whole history of
-  the state machine, from the start to last transition (the head of the list)
+  ## Statechart Structure
 
-  A configuration is a list of lists: each inner list represents an
-  orthogonal region of the statechart. The elements in each list are
-  the active states, from deeper state (the simple or leaf state) up to
-  the root state (always "root").
-  For example:
-      [["r11", "r1", "root"], ["s211", "s21", "s2", "root"]]
+  A compiled statechart contains:
+
+  - `states` - A flattened map of all states in the hierarchy with their full paths
+  
+  The statechart compiler takes a nested `State` definition and:
+  
+  1. Validates the state machine structure
+  2. Flattens the hierarchy into addressable state paths  
+  3. Validates all transitions reference valid states
+  4. Ensures there are no duplicate state names in the same scope
+  5. Verifies initial states are valid
+
+  ## State Addressing
+
+  States in a statechart are addressed using dot notation paths:
+  
+  - `"root"` - The root state
+  - `"root.playing"` - A top-level state called "playing"  
+  - `"root.playing.normal_speed"` - A nested state "normal_speed" inside "playing"
+
+  ## Configuration
+
+  The active configuration represents which states are currently active.
+  Due to hierarchical composition, multiple states can be active simultaneously.
+  
+  For example, if a media player is in "normal speed" mode:
+  - Configuration: `[["normal_speed", "playing", "root"]]`
+  - Active states: "normal_speed", "playing", and "root"
+
+  ## Building a Statechart
+
+      # Define your state machine structure
+      definition = %State{
+        initial: "idle",
+        substates: %{
+          "idle" => %State{transitions: %{"start" => "running"}},
+          "running" => %State{transitions: %{"stop" => "idle"}}
+        }
+      }
+      
+      # Compile into a statechart
+      statechart = Statechart.build(definition)
+
+  ## Validation
+
+  The build process performs comprehensive validation:
+
+  - All referenced states must exist
+  - Initial states must be valid substates
+  - No duplicate state names in the same scope
+  - Transitions must reference valid target states
+  - State hierarchy must be well-formed
+
+  If validation fails, specific exceptions are raised describing the problem.
+
+  ## Usage with __using__ macro
+
+  You can also define statecharts using the `__using__` macro:
+
+      defmodule MyMachine do
+        use ExMachine.Statechart
+        
+        def definition do
+          %State{
+            # ... your state definition
+          }
+        end
+      end
+
   """
   alias ExMachine.{State, Transition, Final, History}
 
