@@ -224,20 +224,6 @@ ExMachine is currently in **alpha stage**. While the core functionality is worki
 
 We welcome contributions! Please see our [contribution guidelines](CONTRIBUTING.md) and feel free to open issues or pull requests.
 
-## License
-
-ExMachine is Copyright © 2018 Restore srl. It is free software,
-and may be redistributed under the terms specified in the LICENSE file.
-
-## About Restore srl
-
-![Restore](http://re-store.it/images/logo_c.gif)
-
-ExMachine is maintained and funded by Restore srl.
-The names and logos for Restore are trademarks of Restore srl.
-
-We love Elixir and open source software.
-
 ## Inspiration
 
 - [Statecharts: a visual formalism for complex systems (David Harel)](https://ac.els-cdn.com/0167642387900359/1-s2.0-0167642387900359-main.pdf?_tid=a9d41960-080a-49d4-b051-5ed409afb933&acdnat=1538686934_8d122d2d37b601ed2f3c06a462a03fa5)
