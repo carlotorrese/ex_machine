@@ -8,13 +8,11 @@ defmodule ExMachine.MixProject do
       elixir: "~> 1.14",
       start_permanent: Mix.env() == :prod,
       elixirc_paths: elixirc_paths(Mix.env()),
-      source_url: "https://github.com/USER/PROJECT",
-      homepage_url: "http://YOUR_PROJECT_HOMEPAGE",
-      docs: [
-        main: "readme",
-        extras: ["README.md"],
-        #logo: "path/to/logo.png"
-      ],
+      description: description(),
+      package: package(),
+      source_url: "https://github.com/carlotorrese/ex_machine",
+      homepage_url: "https://github.com/carlotorrese/ex_machine",
+      docs: docs(),
       deps: deps()
     ]
   end
@@ -35,4 +33,32 @@ defmodule ExMachine.MixProject do
   defp elixirc_paths(:dev), do: ["lib", "samples"]
   defp elixirc_paths(:test), do: ["lib", "samples"]
   defp elixirc_paths(_), do: ["lib"]
+
+  defp description() do
+    "An Elixir functional implementation of a finite state machine, based on Statechart formalism."
+  end
+
+  defp package() do
+    [
+      name: "ex_machine",
+      files: ~w(lib mix.exs README* LICENSE* CHANGELOG*),
+      licenses: ["MIT"],
+      links: %{
+        "GitHub" => "https://github.com/carlotorrese/ex_machine",
+        "Changelog" => "https://github.com/carlotorrese/ex_machine/blob/main/CHANGELOG.md"
+      },
+      maintainers: ["Carlo Torrese"]
+    ]
+  end
+
+  defp docs() do
+    [
+      main: "readme",
+      extras: ["README.md", "CHANGELOG.md", "LICENSE"],
+      source_ref: "v#{version()}",
+      source_url: "https://github.com/carlotorrese/ex_machine"
+    ]
+  end
+
+  defp version(), do: "0.1.0"
 end
