@@ -1,4 +1,13 @@
 # ExMachine
+
+[![Hex Version](https://img.shields.io/hexpm/v/ex_machine.svg)](https://hex.pm/packages/ex_machine)
+[![Hex Docs](https://img.shields.io/badge/hex-docs-lightgreen.svg)](https://hexdocs.pm/ex_machine/)
+[![CI](https://github.com/carlotorrese/ex_machine/workflows/CI/badge.svg)](https://github.com/carlotorrese/ex_machine/actions)
+[![License](https://img.shields.io/hexpm/l/ex_machine.svg)](https://github.com/carlotorrese/ex_machine/blob/main/LICENSE)
+[![Development Status](https://img.shields.io/badge/status-alpha-orange.svg)](https://github.com/carlotorrese/ex_machine)
+
+> ⚠️ **Early Development Warning**: This project is in active development and the API may change. Use with caution in production environments.
+
 An Elixir functional implementation of a finite state machine, 
 based on Statechart.
 
@@ -178,6 +187,28 @@ iex(1)> m = Machine.init(S0.statechart, %{foo: 0})
 iex(2)>
 
 ```
+
+## Development Status & Roadmap
+
+ExMachine is currently in **alpha stage**. While the core functionality is working and tested, the API may undergo changes as we gather feedback from the community.
+
+### Current State
+- ✅ Core state machine functionality implemented
+- ✅ Statechart formalism support (hierarchical states, transitions, guards)
+- ✅ GenServer integration for process-based state machines
+- ✅ Comprehensive test suite (30+ tests)
+- ✅ Documentation and examples
+
+### Roadmap
+- [ ] API stabilization based on community feedback
+- [ ] Performance optimizations
+- [ ] Additional guard and action features
+- [ ] More comprehensive examples and tutorials
+- [ ] Integration with other Elixir/OTP patterns
+
+### Contributing
+We welcome contributions! Please see our [contribution guidelines](CONTRIBUTING.md) and feel free to open issues or pull requests.
+
 ## License
 ExMachine is Copyright © 2018 Restore srl. It is free software, 
 and may be redistributed under the terms specified in the LICENSE file.

@@ -35,7 +35,7 @@ defmodule ExMachine.MixProject do
   defp elixirc_paths(_), do: ["lib"]
 
   defp description() do
-    "An Elixir functional implementation of a finite state machine, based on Statechart formalism."
+    "An Elixir functional implementation of a finite state machine, based on Statechart formalism. [ALPHA - API may change]"
   end
 
   defp package() do
