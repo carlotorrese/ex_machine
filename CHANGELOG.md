@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2025-06-09
+
+### Added
+- Development status indicators and badges
+- Early development warning in README
+- Comprehensive contributing guidelines (CONTRIBUTING.md)
+- Project roadmap and current state documentation
+- Alpha status indication in package description
+
+### Changed
+- Updated README with development status badges
+- Enhanced documentation for contributors
+
 ## [0.1.0-alpha] - 2025-06-09
 
 ### Added
