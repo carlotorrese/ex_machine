@@ -60,5 +60,5 @@ defmodule ExMachine.MixProject do
     ]
   end
 
-  defp version(), do: "0.1.1"
+  defp version(), do: "0.1.2"
 end
