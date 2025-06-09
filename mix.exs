@@ -41,7 +41,7 @@ defmodule ExMachine.MixProject do
   defp package() do
     [
       name: "ex_machine",
-      files: ~w(lib mix.exs README* LICENSE* CHANGELOG*),
+      files: ~w(lib mix.exs README* LICENSE* CHANGELOG* CONTRIBUTING*),
       licenses: ["MIT"],
       links: %{
         "GitHub" => "https://github.com/carlotorrese/ex_machine",

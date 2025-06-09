@@ -36,17 +36,20 @@ ExMachine is currently in **alpha stage**. We're actively working on stabilizing
 ### Development Setup
 
 1. Clone the repository:
+
    ```bash
    git clone https://github.com/carlotorrese/ex_machine.git
    cd ex_machine
    ```
 
 2. Install dependencies:
+
    ```bash
    mix deps.get
    ```
 
 3. Run tests:
+
    ```bash
    mix test
    ```
