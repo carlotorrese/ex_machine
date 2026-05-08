@@ -15,15 +15,18 @@ defmodule ExMachine do
     * `ExMachine.StateNode` — node in a definition (atomic, compound, parallel,
       region, final, history, choice).
     * `ExMachine.Transition` — single transition record.
-    * `ExMachine.Step` — accumulator threaded through actions and guards;
-      replaces the legacy practice of polluting the user context with engine
-      bookkeeping.
+    * `ExMachine.Step` — accumulator threaded through actions and guards.
+    * `ExMachine.Configuration` — set of currently active states.
+    * `ExMachine.Machine` — running statechart instance.
+    * `ExMachine.Engine` — pure-functional execution engine.
+    * `ExMachine.Trace` — audit trail of macro/microsteps.
 
   > #### Status {: .info}
   >
-  > Version `0.2.0-alpha.1` is a ground-up rewrite. The 0.1.x line is gone:
-  > there is no migration path, but the surface area is small and the new DSL
-  > should be familiar to anyone who has used XState or SCXML.
+  > Version `0.2.0-alpha.1` is a ground-up rewrite. M3 ships atomic, compound,
+  > and final state execution with eventless transitions, raised events and
+  > `done.state.<id>`. History, choice, parallel regions and server-mode
+  > arrive in M4-M7.
 
   ## Hello, traffic light
 
@@ -37,14 +40,48 @@ defmodule ExMachine do
         state :yellow, do: on(:timer, target: :red)
       end
 
-      iex> def_ = TrafficLight.__statechart__()
-      iex> def_.root
-      :traffic_light
-
-  See `ExMachine.Statechart` for the full DSL surface.
+      iex> machine = ExMachine.init(TrafficLight)
+      iex> ExMachine.atomic_states(machine)
+      [:red]
+      iex> machine = ExMachine.dispatch(machine, :timer)
+      iex> ExMachine.atomic_states(machine)
+      [:green]
   """
 
-  @doc "Returns the library version, in sync with `mix.exs`."
+  alias ExMachine.{Engine, Machine}
+
+  @doc "Returns the library version."
   @spec version() :: String.t()
   def version, do: "0.2.0-alpha.1"
+
+  @doc """
+  Build and start a machine from a statechart module (or a precompiled
+  `ExMachine.Definition`). Optionally override the initial context.
+
+  Returns a running `ExMachine.Machine` whose initial entry actions have
+  already executed.
+  """
+  @spec init(module() | ExMachine.Definition.t(), term()) :: Machine.t()
+  def init(statechart_or_def, context \\ nil)
+
+  def init(module, context) when is_atom(module) do
+    init(module.__statechart__(), context)
+  end
+
+  def init(%ExMachine.Definition{} = definition, context) do
+    definition
+    |> Machine.new(context)
+    |> Engine.init()
+  end
+
+  @doc """
+  Dispatch an event to a running machine. Returns the new machine value
+  after run-to-completion. See `ExMachine.Engine.dispatch/2`.
+  """
+  @spec dispatch(Machine.t(), term()) :: Machine.t()
+  defdelegate dispatch(machine, event), to: Engine
+
+  @doc "Atomic states currently active. See `ExMachine.Machine.atomic_states/1`."
+  @spec atomic_states(Machine.t()) :: [atom()]
+  defdelegate atomic_states(machine), to: Machine
 end
