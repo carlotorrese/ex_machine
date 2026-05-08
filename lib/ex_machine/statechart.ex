@@ -1,485 +1,399 @@
 defmodule ExMachine.Statechart do
   @moduledoc """
-  Module for building and validating statechart definitions.
+  Compile-time DSL for declaring a statechart.
 
-  A Statechart is a compiled representation of a hierarchical state machine definition.
-  It provides the foundation for creating and running state machines with complex
-  hierarchical structures, transitions, actions, and guards.
+  Each module that calls `use ExMachine.Statechart` becomes a statechart: at
+  compile time the DSL accumulates state nodes, transitions, and actions; at
+  `__before_compile__` time it produces a frozen `ExMachine.Definition` that
+  is exposed via `__statechart__/0`.
 
-  ## Statechart Structure
+  ## Quick start
 
-  A compiled statechart contains:
+      defmodule TrafficLight do
+        use ExMachine.Statechart
 
-  - `states` - A flattened map of all states in the hierarchy with their full paths
+        initial_context %{cycles: 0}
+        initial :red
 
-  The statechart compiler takes a nested `State` definition and:
+        state :red do
+          on_entry &__MODULE__.log/1
+          on :timer, target: :green
+        end
 
-  1. Validates the state machine structure
-  2. Flattens the hierarchy into addressable state paths  
-  3. Validates all transitions reference valid states
-  4. Ensures there are no duplicate state names in the same scope
-  5. Verifies initial states are valid
+        state :green do
+          on :timer, target: :yellow
+        end
 
-  ## State Addressing
+        state :yellow do
+          on :timer, target: :red, action: &__MODULE__.incr/1
+        end
 
-  States in a statechart are addressed using dot notation paths:
+        def log(step), do: step
+        def incr(step), do: ExMachine.Step.update(step, :cycles, &(&1 + 1))
+      end
 
-  - `"root"` - The root state
-  - `"root.playing"` - A top-level state called "playing"  
-  - `"root.playing.normal_speed"` - A nested state "normal_speed" inside "playing"
+      iex> def_ = TrafficLight.__statechart__()
+      iex> def_.root
+      :traffic_light
+      iex> map_size(def_.nodes)
+      4
 
-  ## Configuration
+  ## Top-level options
 
-  The active configuration represents which states are currently active.
-  Due to hierarchical composition, multiple states can be active simultaneously.
+  `use ExMachine.Statechart` accepts:
 
-  For example, if a media player is in "normal speed" mode:
-  - Configuration: `[["normal_speed", "playing", "root"]]`
-  - Active states: "normal_speed", "playing", and "root"
+    * `:type` — `:compound` (default) or `:parallel`. A `:parallel` root
+      requires that every direct child be a `region`.
+    * `:root` — atom override for the root node id. Defaults to
+      `Macro.underscore(module_basename) |> String.to_atom/1`.
 
-  ## Building a Statechart
+  ## DSL surface
 
-      # Define your state machine structure
-      definition = %State{
-        initial: "idle",
-        substates: %{
-          "idle" => %State{transitions: %{"start" => "running"}},
-          "running" => %State{transitions: %{"stop" => "idle"}}
-        }
-      }
-      
-      # Compile into a statechart
-      statechart = Statechart.build(definition)
+  Top-level (module-level) macros:
+
+    * `initial id` — set the initial substate of the root.
+    * `initial_context term` — set the initial context returned to fresh
+      machines.
+    * `state id, opts \\\\ [], do: block` — declare a substate. Without a
+      block, becomes `:atomic`; with a block containing `state` declarations,
+      becomes `:compound`.
+    * `parallel id, opts \\\\ [], do: block` — declare a parallel substate
+      whose children must all be `region`.
+    * `region id, opts, do: block` — declare a region (only inside `parallel`).
+    * `history id, type: :deep | :shallow [, default: id]` — declare a
+      history pseudostate.
+    * `choice id, do: block` — declare a choice pseudostate with branches.
+    * `final id, opts \\\\ [], do: block` — declare a final state.
+
+  Inside a `state` / `region` body:
+
+    * `on_entry fun` — append an entry action `(Step -> Step)`.
+    * `on_exit fun` — append an exit action `(Step -> Step)`.
+    * `on event, opts` — declare a transition. `opts`:
+        * `:target` — destination state id (or `nil` for an action-only
+          transition);
+        * `:guard` — `(context -> boolean)`;
+        * `:action` — `(Step -> Step)`;
+        * `:type` — `:external` (default) or `:internal`.
+      Use `event: nil` (or pass `nil`) for an eventless transition.
+
+  Inside a `choice` body:
+
+    * `cond_branch guard, target: id` — guarded branch.
+    * `otherwise target: id` — default fallback branch (must be last).
 
   ## Validation
 
-  The build process performs comprehensive validation:
+  All declarations are validated at compile-time via
+  `ExMachine.Definition.validate!/1`. Any structural error raises
+  `ExMachine.Definition.Error` with a precise message and points to the
+  offending state.
 
-  - All referenced states must exist
-  - Initial states must be valid substates
-  - No duplicate state names in the same scope
-  - Transitions must reference valid target states
-  - State hierarchy must be well-formed
+  ## State of the implementation {: .info}
 
-  If validation fails, specific exceptions are raised describing the problem.
-
-  ## Usage with __using__ macro
-
-  You can also define statecharts using the `__using__` macro:
-
-      defmodule MyMachine do
-        use ExMachine.Statechart
-        
-        def definition do
-          %State{
-            # ... your state definition
-          }
-        end
-      end
-
+  Milestone M2 introduces the DSL and the compiled `Definition`. The
+  execution engine, history, choice resolution, parallel selection, and
+  server-mode arrive in milestones M3-M7.
   """
-  alias ExMachine.{State, Transition, Final, History}
 
-  @type t :: %__MODULE__{
-          states: map
-        }
+  alias ExMachine.Statechart.Builder
 
-  defstruct states: nil
+  @doc false
+  defmacro __using__(opts) do
+    type = Keyword.get(opts, :type, :compound)
 
-  defmacro __using__(_opts) do
+    unless type in [:compound, :parallel] do
+      raise ArgumentError, "use ExMachine.Statechart, :type must be :compound or :parallel"
+    end
+
+    quote bind_quoted: [type: type, opts: opts] do
+      Module.register_attribute(__MODULE__, :exm_root, persist: false)
+      Module.register_attribute(__MODULE__, :exm_root_kind, persist: false)
+      Module.register_attribute(__MODULE__, :exm_initial_context, persist: false)
+      Module.register_attribute(__MODULE__, :exm_nodes, persist: false)
+      Module.register_attribute(__MODULE__, :exm_stack, persist: false)
+
+      root_id =
+        Keyword.get_lazy(opts, :root, fn ->
+          __MODULE__
+          |> Module.split()
+          |> List.last()
+          |> Macro.underscore()
+          |> String.to_atom()
+        end)
+
+      ExMachine.Statechart.Builder.init_module(__MODULE__, root_id, type)
+
+      import ExMachine.Statechart,
+        only: [
+          initial: 1,
+          initial_context: 1,
+          state: 1,
+          state: 2,
+          state: 3,
+          parallel: 1,
+          parallel: 2,
+          parallel: 3,
+          region: 2,
+          region: 3,
+          history: 2,
+          choice: 1,
+          choice: 2,
+          final: 1,
+          final: 2,
+          on_entry: 1,
+          on_exit: 1,
+          on: 1,
+          on: 2,
+          cond_branch: 2,
+          otherwise: 1
+        ]
+
+      @before_compile ExMachine.Statechart
+    end
+  end
+
+  @doc false
+  defmacro __before_compile__(env) do
+    fields = Builder.collect(env.module)
+    definition = ExMachine.Definition.build!(fields)
+    escaped = Macro.escape(definition)
+
     quote do
-      alias ExMachine.{Statechart, State, Final, History, Transition}
-      import ExMachine.Context
+      @doc """
+      Returns the compiled and validated `ExMachine.Definition` for this
+      statechart. Computed at compile-time and inlined; callable at runtime
+      with no overhead.
+      """
+      @spec __statechart__() :: ExMachine.Definition.t()
+      def __statechart__, do: unquote(escaped)
     end
   end
 
-  def new() do
-    %__MODULE__{}
-  end
+  # ── Top-level declarations ────────────────────────────────────────────────
 
-  defmodule InvalidDefinition do
-    defexception [:message]
-
-    @moduledoc """
-    Raised when submitted an invalid definition
-    """
-    @impl true
-    def exception(definition) do
-      %__MODULE__{
-        message: "Definition #{inspect(definition)} is not valid"
-      }
+  @doc "Set the initial substate of the root (or current parent in nested usage)."
+  defmacro initial(id) when is_atom(id) do
+    quote do
+      ExMachine.Statechart.Builder.set_initial(__MODULE__, unquote(id))
     end
   end
 
-  defmodule NotDefinedState do
-    defexception [:message]
-
-    @moduledoc """
-    Raised when a state name is used that is not defined
-    """
-    @impl true
-    def exception(state_name) do
-      %__MODULE__{
-        message: "State name \"#{state_name}\" is not defined"
-      }
+  @doc "Set the initial context shipped with fresh machines."
+  defmacro initial_context(term) do
+    quote do
+      ExMachine.Statechart.Builder.set_initial_context(__MODULE__, unquote(term))
     end
   end
 
-  defmodule DuplicatedState do
-    defexception [:message]
+  # ── state ────────────────────────────────────────────────────────────────
 
-    @moduledoc """
-    Raised when a state name is used more than once
-    """
-    @impl true
-    def exception(names_list) do
-      %__MODULE__{
-        message: "State names \"#{names_list}\" are not unique"
-      }
+  defmacro state(id), do: do_state(id, [], nil)
+
+  defmacro state(id, opts_or_block) do
+    {block, opts} = pop_block(opts_or_block)
+    do_state(id, opts, block)
+  end
+
+  defmacro state(id, opts, do: block), do: do_state(id, opts, block)
+
+  defp do_state(id, opts, block) do
+    quote do
+      ExMachine.Statechart.Builder.start_node(
+        __MODULE__,
+        unquote(id),
+        unquote(opts),
+        :state
+      )
+
+      unquote(block || :ok)
+      ExMachine.Statechart.Builder.end_node(__MODULE__, unquote(id))
     end
   end
 
-  defmodule NotValidInitial do
-    defexception [:message]
+  # ── final ────────────────────────────────────────────────────────────────
 
-    @moduledoc """
-    Raised when initial state of a composite state is not defined or is not
-    a descendants of the state
-    """
-    @impl true
-    def exception({initial, state_name}) do
-      %__MODULE__{
-        message:
-          "Initial state \"#{initial}\" is not valid or not a descendant of composite state \"#{state_name}\""
-      }
+  defmacro final(id), do: do_final(id, [], nil)
+
+  defmacro final(id, opts_or_block) do
+    {block, opts} = pop_block(opts_or_block)
+    do_final(id, opts, block)
+  end
+
+  defp do_final(id, opts, block) do
+    quote do
+      ExMachine.Statechart.Builder.start_node(
+        __MODULE__,
+        unquote(id),
+        unquote(opts),
+        :final
+      )
+
+      unquote(block || :ok)
+      ExMachine.Statechart.Builder.end_node(__MODULE__, unquote(id))
     end
   end
 
-  @doc """
-  Build and return a `Statechart` struct that contains the compiled and
-  validated version of the statechart in `definition` argument,
-  ready to be executed in a Machine.
+  # ── parallel ─────────────────────────────────────────────────────────────
 
-  During compilation, Statechart verifies that the definition is valid and raise
-  an exception if there is a problem.
+  defmacro parallel(id), do: do_parallel(id, [], nil)
 
-  ## Examples
-      iex> eng = Statechart.build(%State{initial: "s1", substates: %{ "s1" => %State{}}})
-      iex> Enum.count(eng.states)
-      2
-
-      iex> Statechart.build("invalid")
-      ** (ExMachine.Statechart.InvalidDefinition) Definition "invalid" is not valid
-
-      iex> defs = %State{initial: "invalid_state", substates: %{ "s1" => %State{}}}
-      iex> Statechart.build(defs)
-      ** (ExMachine.Statechart.NotValidInitial) Initial state "invalid_state" is not valid or not a descendant of composite state "root"
-
-  """
-  def build(%State{substates: s} = definition) when s == %{},
-    do: raise(InvalidDefinition, definition)
-
-  def build(%State{} = definition) do
-    new()
-    |> Map.put(:states, build_state("root", definition))
-    |> checks_states()
+  defmacro parallel(id, opts_or_block) do
+    {block, opts} = pop_block(opts_or_block)
+    do_parallel(id, opts, block)
   end
 
-  def build(definition), do: raise(InvalidDefinition, definition)
+  defmacro parallel(id, opts, do: block), do: do_parallel(id, opts, block)
 
-  defp new_state_definition(name, type, parent) do
-    %{}
-    |> Map.put(:name, name)
-    |> Map.put(:type, type)
-    |> Map.put(:parent, parent)
-    |> Map.put(:children, MapSet.new())
-    |> Map.put(:initial, nil)
-    |> Map.put(:transitions, nil)
-    |> Map.put(:entry, nil)
-    |> Map.put(:exit, nil)
-    |> Map.put(:macrosteps?, false)
-    |> Map.put(:history?, false)
-  end
+  defp do_parallel(id, opts, block) do
+    quote do
+      ExMachine.Statechart.Builder.start_node(
+        __MODULE__,
+        unquote(id),
+        unquote(opts),
+        :parallel
+      )
 
-  defp build_state(name, state, parent \\ nil)
-
-  defp build_state(name, %State{substates: subst} = state, parent) when subst == %{} do
-    state_def =
-      new_state_definition(name, :simple, parent)
-      |> Map.put(:transitions, build_transitions(state.transitions))
-      |> Map.put(:entry, state.entry)
-      |> Map.put(:exit, state.exit)
-
-    %{name => state_def}
-  end
-
-  defp build_state(name, %State{} = state, parent) do
-    substates_def =
-      Enum.map(state.substates, fn {sub_name, sub_def} ->
-        build_state(sub_name, sub_def, name)
-      end)
-      |> Enum.reduce(%{}, &Map.merge(&1, &2))
-
-    children = MapSet.new(Map.keys(state.substates))
-
-    state_def =
-      new_state_definition(name, :composite, parent)
-      |> Map.put(:children, children)
-      |> Map.put(:initial, state.initial)
-      |> Map.put(:transitions, build_transitions(state.transitions))
-      |> Map.put(:entry, state.entry)
-      |> Map.put(:exit, state.exit)
-      |> check_history(children, substates_def)
-
-    Map.merge(%{name => state_def}, substates_def)
-  end
-
-  defp build_state(name, %Final{entry: entry}, parent) do
-    state_def =
-      new_state_definition(name, :final, parent)
-      |> Map.put(:entry, entry)
-
-    %{name => state_def}
-  end
-
-  defp build_state(name, %History{type: type}, parent) do
-    state_def = new_state_definition(name, type, parent)
-
-    %{name => state_def}
-  end
-
-  defp check_history(state_definition, children, substates_def) do
-    if Enum.any?(
-         children,
-         &(substates_def[&1][:type] == :deep or substates_def[&1][:type] == :shallow)
-       ) do
-      Map.put(state_definition, :history?, true)
-    else
-      Map.put(state_definition, :history?, false)
+      unquote(block || :ok)
+      ExMachine.Statechart.Builder.end_node(__MODULE__, unquote(id))
     end
   end
 
-  defp build_transitions(transitions) do
-    for {event, tran} <- transitions, into: %{} do
-      build_transition({event, tran})
+  # ── region (parallel-only child) ─────────────────────────────────────────
+
+  defmacro region(id, opts_or_block) do
+    {block, opts} = pop_block(opts_or_block)
+    do_region(id, opts, block)
+  end
+
+  defmacro region(id, opts, do: block), do: do_region(id, opts, block)
+
+  defp do_region(id, opts, block) do
+    quote do
+      ExMachine.Statechart.Builder.start_node(
+        __MODULE__,
+        unquote(id),
+        unquote(opts),
+        :region
+      )
+
+      unquote(block || :ok)
+      ExMachine.Statechart.Builder.end_node(__MODULE__, unquote(id))
     end
   end
 
-  defp build_transition({event, %Transition{} = transition}) do
-    {event,
-     %{target: transition.target, guard: transition.guard, name: event, action: transition.action}}
+  # ── history (leaf) ───────────────────────────────────────────────────────
+
+  defmacro history(id, opts) when is_atom(id) and is_list(opts) do
+    quote do
+      ExMachine.Statechart.Builder.start_node(
+        __MODULE__,
+        unquote(id),
+        unquote(opts),
+        :history
+      )
+
+      ExMachine.Statechart.Builder.end_node(__MODULE__, unquote(id))
+    end
   end
 
-  defp build_transition({event, target}) when is_binary(target) do
-    {event, %{target: target, guard: nil, name: event, action: nil}}
+  # ── choice ───────────────────────────────────────────────────────────────
+
+  defmacro choice(id), do: do_choice(id, [], nil)
+
+  defmacro choice(id, opts_or_block) do
+    {block, opts} = pop_block(opts_or_block)
+    do_choice(id, opts, block)
   end
 
-  defp checks_states(statechart) do
-    Enum.map(statechart.states, fn {name, state} ->
-      statechart
-      |> check_initial(name, state)
-    end)
+  defp do_choice(id, opts, block) do
+    quote do
+      ExMachine.Statechart.Builder.start_node(
+        __MODULE__,
+        unquote(id),
+        unquote(opts),
+        :choice
+      )
 
-    statechart
+      unquote(block || :ok)
+      ExMachine.Statechart.Builder.end_node(__MODULE__, unquote(id))
+    end
   end
 
-  defp check_initial(statechart, name, %{initial: initial, type: :composite}) do
-    unless Enum.member?(get_descendants(statechart, name), initial),
-      do: raise(NotValidInitial, {initial, name})
+  @doc "Declare a guarded branch inside a `choice` block."
+  defmacro cond_branch(guard, opts) when is_list(opts) do
+    target = Keyword.fetch!(opts, :target)
 
-    statechart
+    quote do
+      ExMachine.Statechart.Builder.add_choice_branch(
+        __MODULE__,
+        unquote(guard),
+        unquote(target)
+      )
+    end
   end
 
-  defp check_initial(statechart, _name, _state), do: statechart
+  @doc "Declare the default branch (no guard) inside a `choice` block."
+  defmacro otherwise(opts) when is_list(opts) do
+    target = Keyword.fetch!(opts, :target)
 
-  # defp check_duplicates_states(states_list) do
-  #   states =
-  #     Enum.map(states_list, fn {name, _} -> name end)
-  #     |> Enum.group_by(& &1)
-  #     |> Enum.filter(fn
-  #       {_, [_, _ | _]} -> true
-  #       _ -> false
-  #     end)
-  #     |> Enum.map(fn {x, _} -> x end)
+    quote do
+      ExMachine.Statechart.Builder.add_choice_branch(__MODULE__, nil, unquote(target))
+    end
+  end
 
-  #   unless Enum.empty?(states) do
-  #     raise(DuplicatedState, states)
-  #   else
-  #     states_list
-  #   end
-  # end
+  # ── Inside-state declarations ────────────────────────────────────────────
 
-  @doc """
-  Returns the ancestors of `state` (parent of state, parent of parent, etc),
-  in form of a list of string, ordered from nearest parent to (and always)
-  the "root" state.
+  @doc "Append an entry action `(Step -> Step)` to the current state."
+  defmacro on_entry(fun) do
+    quote do
+      ExMachine.Statechart.Builder.add_entry(__MODULE__, unquote(fun))
+    end
+  end
 
-  ## Examples
-      iex> defs = %State{initial: "s1", substates: %{ "s1" => %State{ initial: "s11", substates: %{ "s11" => %State{}}}}}
-      iex> eng = Statechart.build(defs)
-      iex> Statechart.get_ancestors(eng, "s11")
-      ["s1", "root"]
-  """
-  def get_ancestors(statechart, state_name) do
-    case statechart.states[state_name].parent do
-      nil ->
-        []
-
-      parent ->
-        [parent | get_ancestors(statechart, parent)]
+  @doc "Append an exit action `(Step -> Step)` to the current state."
+  defmacro on_exit(fun) do
+    quote do
+      ExMachine.Statechart.Builder.add_exit(__MODULE__, unquote(fun))
     end
   end
 
   @doc """
-  Returns the ancestors of `state` (parent of state, parent of parent, etc),
-  in form of a list of string, ordered from nearest parent to (and excluded)
-  the `until` state.
+  Declare a transition. Two forms:
 
-  ## Examples
-      iex> defs = %State{initial: "s1", substates: %{ "s1" => %State{ initial: "s11", substates: %{ "s11" => %State{}}}}}
-      iex> eng = Statechart.build(defs)
-      iex> Statechart.get_ancestors_until(eng, "s11", "root")
-      ["s1"]
+      on :event, target: :foo            # event-triggered
+      on event: nil, target: :foo        # eventless (also `on nil, target: :foo`)
   """
-  def get_ancestors_until(statechart, state_name, until) do
-    case statechart.states[state_name].parent do
-      nil ->
-        []
+  defmacro on(event_or_opts) when is_list(event_or_opts) do
+    do_on(Keyword.fetch!(event_or_opts, :event), Keyword.delete(event_or_opts, :event))
+  end
 
-      parent ->
-        if parent == until do
-          []
-        else
-          [parent | get_ancestors_until(statechart, parent, until)]
-        end
+  defmacro on(event), do: do_on(event, [])
+
+  defmacro on(event, opts) when is_list(opts), do: do_on(event, opts)
+
+  defp do_on(event, opts) do
+    transition_opts =
+      [event: event] ++
+        Keyword.take(opts, [:target, :guard, :action, :type])
+
+    quote do
+      ExMachine.Statechart.Builder.add_transition(__MODULE__, unquote(transition_opts))
     end
   end
 
-  @doc """
-  Returns the descendants of `state`, in form of an unordered MapSet of string,
-  containing all the descendants (children, children of children, etc) of `state`.
+  # ── helpers ──────────────────────────────────────────────────────────────
 
-  ## Examples
-      iex> defs = %State{initial: "s1", substates: %{ "s1" => %State{ initial: "s11", substates: %{ "s11" => %State{}}}}}
-      iex> eng = Statechart.build(defs)
-      iex> Statechart.get_descendants(eng, "root")
-      MapSet.new(["s1", "s11"])
-  """
-  def get_descendants(statechart, state_name) when is_binary(state_name) do
-    state = statechart.states[state_name]
-
-    case MapSet.size(state[:children]) do
-      0 -> MapSet.new()
-      _ -> MapSet.union(state.children, get_descendants(statechart, state.children))
+  # Splits `[opt1: x, do: block]` into `{block, [opt1: x]}` and treats
+  # a bare AST `do: block` keyword the same way. If the argument is an AST
+  # block (from `state :foo do ... end` parsed without keyword), returns
+  # `{block, []}`.
+  defp pop_block(opts_or_block) when is_list(opts_or_block) do
+    case Keyword.pop(opts_or_block, :do) do
+      {nil, opts} -> {nil, opts}
+      {block, opts} -> {block, opts}
     end
   end
 
-  def get_descendants(statechart, %MapSet{} = states) when is_map(states) do
-    Enum.reduce(states, MapSet.new(), fn name, acc ->
-      MapSet.union(acc, get_descendants(statechart, name))
-    end)
-  end
-
-  @doc """
-  Return list of initial states from argument `state` deep to a leaf state.
-
-  The function uses `:initial` key in the `%State{}` definition,
-  unless it encounter a history state (to be implemented)
-
-    ## Examples
-      iex> defs = %State{initial: "s1", substates: %{ "s1" => %State{ initial: "s11", substates: %{ "s11" => %State{}}}}}
-      iex> eng = Statechart.build(defs)
-      iex> Statechart.get_initials(eng, "root")
-      ["root", "s1", "s11"]
-      iex> Statechart.get_initials(eng, "s1")
-      ["s1", "s11"]
-
-  """
-  def get_initials(statechart, state) do
-    # TODO: implements history
-    case statechart.states[state][:initial] do
-      nil -> [state]
-      initial -> [state | get_initials(statechart, initial)]
-    end
-  end
-
-  @doc """
-  Return the list of enter actions for each state in list `states_list`,
-  if defined for the state,  in the same exact order of `states_list`
-  """
-  def get_entry_actions(statechart, states_list) do
-    for state_name <- states_list, statechart.states[state_name][:entry] do
-      statechart.states[state_name].entry
-    end
-  end
-
-  @doc """
-  Return the list of exit actions for each state in list `states_list`,
-  if defined for the state, in the same exact order of `states_list`
-  """
-  def get_exit_actions(statechart, states_list) do
-    for state_name <- states_list, statechart.states[state_name][:exit] do
-      statechart.states[state_name].exit
-    end
-  end
-
-  @doc """
-  Return a transition map if `state` have a transition defined
-  to handle `event`, otherwise `nil`
-  """
-  def get_transition_for(statechart, state, {event, _params}) do
-    statechart.states[state][:transitions][event]
-  end
-
-  def get_transition_for(statechart, state, event) do
-    statechart.states[state][:transitions][event]
-  end
-
-  @doc """
-  Return the Least Common Compound Ancestor of `states` list.
-
-  LCCA of a list `states` is the lowest (i.e. deepest) state in the state
-  hierarchy that has all state in `states` as descendants.
-
-  In other words LCCA is the state `s` such that `s` is a ancestor of all
-  states on `states` list and no descendants of `s` has this property.
-
-  Return `nil` if in the `states` list is present the root state because can't
-  exist a state that is parent of root state.
-
-  Note that since we are speaking of ancestor (parent or parent
-  of a parent, etc.) the LCCA is never a member of `state` list.
-
-  """
-
-  def find_lcca(statechart, states) when is_list(states) do
-    ancestors = get_ancestors(statechart, hd(states))
-
-    Enum.reduce_while(ancestors, nil, fn ancestor, _acc ->
-      if Enum.all?(tl(states), fn state ->
-           Enum.member?(get_descendants(statechart, ancestor), state)
-         end) do
-        {:halt, ancestor}
-      else
-        {:cont, nil}
-      end
-    end)
-  end
-
-  @doc """
-  Returns a list of states that must be exited when the machine is exiting
-  from the state `source`, considering the `lcca`
-  """
-  def get_exiting_states(statechart, source, lcca) do
-    [source | get_ancestors_until(statechart, source, lcca)]
-  end
-
-  @doc """
-  Returns a list of states that must be entered when the machine is entering
-  in the state `target`, considering the `lcca`
-  """
-  def get_entering_states(statechart, target, lcca) do
-    Enum.reverse(get_ancestors_until(statechart, target, lcca)) ++
-      get_initials(statechart, target)
-  end
+  defp pop_block(other), do: {other, []}
 end

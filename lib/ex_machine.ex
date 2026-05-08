@@ -1,111 +1,50 @@
 defmodule ExMachine do
-  alias ExMachine.Machine
-
   @moduledoc """
-  ExMachine - A functional implementation of hierarchical state machines based on Statechart formalism.
+  Functional hierarchical state machines for Elixir.
 
-  ExMachine provides a purely functional approach to defining and executing finite state machines
-  that follow the Statechart specification proposed by David Harel in 1987. It supports 
-  hierarchical states, entry/exit actions, guard functions, and extended state management.
+  ExMachine implements the Statechart formalism (Harel 1987 / SCXML W3C) on top
+  of pure-functional Elixir. A statechart is declared at compile-time via the
+  `ExMachine.Statechart` DSL; the resulting `ExMachine.Definition` can be
+  executed either functionally — via `ExMachine.Engine` — or as a supervised
+  GenServer process — via `ExMachine.Server` (M6).
 
-  ## Features
+  ## Modules
 
-  - **Hierarchical States**: States can contain substates, creating complex state hierarchies
-  - **Entry/Exit Actions**: Execute functions when entering or leaving states  
-  - **Transition Actions**: Execute functions during state transitions
-  - **Guard Functions**: Conditional logic to control when transitions can occur
-  - **Extended State**: Maintain context data that travels with the state machine
-  - **Internal Events**: Support for run-to-completion semantics
-  - **Compile-time Validation**: State machine definitions are validated at compile time
+    * `ExMachine.Statechart` — DSL to declare a statechart at compile time.
+    * `ExMachine.Definition` — compiled, validated statechart definition.
+    * `ExMachine.StateNode` — node in a definition (atomic, compound, parallel,
+      region, final, history, choice).
+    * `ExMachine.Transition` — single transition record.
+    * `ExMachine.Step` — accumulator threaded through actions and guards;
+      replaces the legacy practice of polluting the user context with engine
+      bookkeeping.
 
-  ## Basic Usage
+  > #### Status {: .info}
+  >
+  > Version `0.2.0-alpha.1` is a ground-up rewrite. The 0.1.x line is gone:
+  > there is no migration path, but the surface area is small and the new DSL
+  > should be familiar to anyone who has used XState or SCXML.
 
-      # Define a simple state machine
+  ## Hello, traffic light
+
       defmodule TrafficLight do
         use ExMachine.Statechart
-        
-        alias ExMachine.State
-        
-        def definition do
-          %State{
-            initial: "red",
-            substates: %{
-              "red" => %State{transitions: %{"timer" => "green"}},
-              "green" => %State{transitions: %{"timer" => "yellow"}},
-              "yellow" => %State{transitions: %{"timer" => "red"}}
-            }
-          }
-        end
+
+        initial :red
+
+        state :red,    do: on(:timer, target: :green)
+        state :green,  do: on(:timer, target: :yellow)
+        state :yellow, do: on(:timer, target: :red)
       end
-      
-      # Use the state machine
-      alias ExMachine.{Machine, Statechart}
-      
-      statechart = Statechart.build(TrafficLight.definition())
-      machine = ExMachine.init(statechart, %{})
-      machine = ExMachine.dispatch(machine, "timer")
 
-  ## State Machine Execution
+      iex> def_ = TrafficLight.__statechart__()
+      iex> def_.root
+      :traffic_light
 
-  State machines in ExMachine follow these principles:
-
-  1. **Immutable**: Each transition returns a new machine instance
-  2. **Functional**: No side effects during transitions (except through actions)
-  3. **Deterministic**: Given the same state and event, the result is always the same
-  4. **Run-to-completion**: Events are processed completely before the next event
-
-  See the main modules for detailed documentation:
-
-  - `ExMachine.Machine` - Core machine execution logic
-  - `ExMachine.Statechart` - State machine definition and validation
-  - `ExMachine.State` - Individual state definitions
-  - `ExMachine.Transition` - Transition definitions with actions and guards
+  See `ExMachine.Statechart` for the full DSL surface.
   """
-  @doc """
-  Initialize a state machine with the given statechart definition and initial context.
 
-  This is a convenience function that delegates to `ExMachine.Machine.init/2`.
-
-  ## Parameters
-
-  - `statechart` - A compiled statechart definition from `ExMachine.Statechart.build/1`
-  - `context` - Initial context data (any term)
-
-  ## Returns
-
-  A running `ExMachine.Machine` in its initial configuration.
-
-  ## Examples
-
-      statechart = Statechart.build(MyStateMachine.definition())
-      machine = ExMachine.init(statechart, %{counter: 0})
-      
-  """
-  def init(statechart, context) do
-    Machine.init(statechart, context)
-  end
-
-  @doc """
-  Dispatch an event to a running state machine.
-
-  This is a convenience function that delegates to `ExMachine.Machine.dispatch/2`.
-
-  ## Parameters
-
-  - `machine` - A running `ExMachine.Machine` instance
-  - `event` - The event to dispatch (string or atom)
-
-  ## Returns
-
-  A new `ExMachine.Machine` instance with the updated state and context.
-
-  ## Examples
-
-      machine = ExMachine.dispatch(machine, "start")
-      machine = ExMachine.dispatch(machine, :stop)
-
-  """
-  def dispatch(machine, event) do
-    Machine.dispatch(machine, event)
-  end
+  @doc "Returns the library version, in sync with `mix.exs`."
+  @spec version() :: String.t()
+  def version, do: "0.2.0-alpha.1"
 end

@@ -1,91 +1,85 @@
 defmodule ExMachine.Transition do
   @moduledoc """
-  Defines a state transition with optional guard functions and actions.
+  Represents a single transition in a statechart definition.
 
-  Transitions specify how a state machine moves from one state to another in response
-  to events. They can include conditional logic (guards) and side effects (actions).
+  A transition is the binding between an event (or eventless trigger), a guard
+  condition, an optional action, and a target state. Transitions are produced by
+  the `ExMachine.Statechart` DSL via `on/2` declarations and never constructed
+  by hand in user code.
 
-  ## Structure
+  Transitions follow SCXML semantics:
 
-  A transition contains:
+    * `:event` — atom, or `nil` for an eventless transition (fired during
+      run-to-completion when the guard, if any, holds).
+    * `:source` — id of the state that owns the transition.
+    * `:target` — id of the destination state, or `nil` for a pure side-effect
+      transition (action only, no state change). Always `nil` when `:type` is
+      `:internal` and the transition is acting only on the context.
+    * `:guard` — `(context -> boolean)` arity-1 function or `nil`.
+    * `:action` — `(step -> step)` arity-1 function or `nil`. Receives the
+      current `ExMachine.Step` and returns an updated one.
+    * `:type` — `:external` (default) or `:internal`. An external transition
+      exits and re-enters the source's compound when `target` is a descendant;
+      an internal transition stays inside.
 
-  - `target` - The destination state name  
-  - `guard` - Optional function that must return `true` for the transition to fire
-  - `action` - Optional function to execute when the transition is taken
-
-  ## Guard Functions
-
-  Guards are predicates that determine whether a transition should be taken.
-  They receive the current context and must return a boolean:
-
-      guard: fn context -> context.counter > 10 end
-
-  If multiple transitions from the same state have the same trigger event,
-  guards are used to determine which transition should fire.
-
-  ## Action Functions  
-
-  Actions are executed when a transition is taken and can modify the context:
-
-      action: fn context -> %{context | counter: context.counter + 1} end
-
-  Actions should be pure functions that return the new context state.
-
-  ## Usage
-
-  Transitions can be defined in several ways:
-
-      # Simple transition (just target state)
-      "event" => "target_state"
-      
-      # Transition with action
-      "event" => %Transition{
-        target: "target_state",
-        action: fn context -> %{context | value: "new_value"} end
-      }
-      
-      # Transition with guard and action  
-      "event" => %Transition{
-        target: "target_state",
-        guard: fn context -> context.ready? end,
-        action: fn context -> %{context | attempts: context.attempts + 1} end
-      }
-
-  ## Examples
-
-      # Conditional transition based on context
-      %Transition{
-        target: "success",
-        guard: fn context -> context.password == "secret" end,
-        action: fn context -> %{context | authenticated: true} end
-      }
-      
-      # Transition that modifies context
-      %Transition{
-        target: "counting", 
-        action: fn context -> Map.update(context, :count, 1, &(&1 + 1)) end
-      }
-
+  `Transition` is a plain struct: it carries no behaviour. The actual matching
+  and resolution lives in `ExMachine.Engine` (added in milestone M3).
   """
 
-  @type t :: %__MODULE__{
-          target: String.t(),
-          guard: function | nil,
-          action: function | nil
+  alias __MODULE__
+
+  @type guard_fun :: (context :: term() -> boolean())
+  @type action_fun :: (ExMachine.Step.t() -> ExMachine.Step.t())
+  @type kind :: :external | :internal
+
+  @type t :: %Transition{
+          event: atom() | nil,
+          source: atom(),
+          target: atom() | nil,
+          guard: guard_fun() | nil,
+          action: action_fun() | nil,
+          type: kind()
         }
-  defstruct target: nil,
+
+  @enforce_keys [:source]
+  defstruct event: nil,
+            source: nil,
+            target: nil,
             guard: nil,
-            action: nil
+            action: nil,
+            type: :external
 
   @doc """
-  Create a new transition with just a target state.
+  Build a transition from a keyword list.
+
+  Used internally by the DSL. Validates that `:source` is provided and that
+  `:type` is one of `:external | :internal`. Other keys default to `nil`.
 
   ## Examples
 
-      Transition.new("target_state")
+      iex> ExMachine.Transition.new(source: :red, event: :timer, target: :green)
+      %ExMachine.Transition{event: :timer, source: :red, target: :green, type: :external}
 
+      iex> ExMachine.Transition.new(source: :foo, event: :tick, type: :internal)
+      %ExMachine.Transition{event: :tick, source: :foo, target: nil, type: :internal}
   """
-  def new(target) do
-    %__MODULE__{target: target}
+  @spec new(keyword()) :: t()
+  def new(opts) when is_list(opts) do
+    type = Keyword.get(opts, :type, :external)
+
+    unless type in [:external, :internal] do
+      raise ArgumentError,
+            "transition :type must be :external or :internal, got: #{inspect(type)}"
+    end
+
+    struct!(__MODULE__, opts)
   end
+
+  @doc """
+  Returns true if the transition has no event, i.e. is eventless (also called
+  "automatic" or "always" transition).
+  """
+  @spec eventless?(t()) :: boolean()
+  def eventless?(%Transition{event: nil}), do: true
+  def eventless?(%Transition{}), do: false
 end

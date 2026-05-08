@@ -3,18 +3,14 @@
     %{
       name: "default",
       files: %{
-        # M1 NOTE: lib/ and test/ are intentionally excluded from credo until
-        # the M2-M3 rewrite replaces the legacy modules. The current code
-        # carries known credo issues that are not worth fixing in flight.
-        # When the rewrite lands, switch `included` back to ["lib/", "test/"]
-        # and remove this comment.
         included: [
+          "lib/",
+          "test/",
           "mix.exs"
         ],
         excluded: [
           ~r"/_build/",
-          ~r"/deps/",
-          ~r"/examples/"
+          ~r"/deps/"
         ]
       },
       plugins: [],
@@ -30,8 +26,12 @@
           {Credo.Check.Consistency.SpaceAroundOperators, []},
           {Credo.Check.Consistency.SpaceInParentheses, []},
           {Credo.Check.Consistency.TabsOrSpaces, []},
+          # Macros and metaprogramming modules use fully-qualified names by
+          # design (cannot alias inside `quote` blocks without leaking aliases
+          # to the user's module). Keep the warning but raise the threshold so
+          # that ordinary code is still checked.
           {Credo.Check.Design.AliasUsage,
-           [priority: :low, if_nested_deeper_than: 2, if_called_more_often_than: 0]},
+           [priority: :low, if_nested_deeper_than: 3, if_called_more_often_than: 30]},
           {Credo.Check.Design.TagFIXME, []},
           {Credo.Check.Design.TagTODO, [exit_status: 0]},
           {Credo.Check.Readability.AliasOrder, []},

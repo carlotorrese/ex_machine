@@ -1,177 +1,260 @@
-defmodule StatechartTest do
+defmodule ExMachine.StatechartTest do
   use ExUnit.Case, async: true
 
-  alias ExMachine.{Statechart, State, Final}
+  alias ExMachine.{Definition, Transition}
 
-  doctest Statechart
+  # ── Compile-time fixtures ─────────────────────────────────────────────────
 
-  def valid_definition() do
-    %State{
-      initial: "s1",
-      substates: %{
-        "s1" => %State{
-          initial: "s11",
-          entry: &StatechartTest.fun1/1,
-          exit: &StatechartTest.fun3/1,
-          substates: %{
-            "s11" => %State{
-              entry: &StatechartTest.fun2/1,
-              exit: &StatechartTest.fun4/1
-            },
-            "s12" => %State{
-              entry: &StatechartTest.fun5/1
-            },
-            "exit" => %Final{}
-          },
-          transitions: %{
-            "tick" => "s2",
-            "exit" => "exit",
-            "rtc" => "s12",
-            "tack" => "s3"
-          }
-        },
-        "s2" => %State{
-          transitions: %{"tock" => "s1"}
-        },
-        "s3" => %State{
-          entry: &StatechartTest.fun6/1,
-          transitions: %{
-            "tuck" => "s2"
-          }
-        }
-      }
-    }
+  defmodule TrafficLight do
+    @moduledoc false
+    use ExMachine.Statechart
+
+    initial_context(%{cycles: 0})
+    initial(:red)
+
+    state :red do
+      on(:timer, target: :green)
+    end
+
+    state :green do
+      on(:timer, target: :yellow)
+    end
+
+    state :yellow do
+      on(:timer, target: :red, action: &TrafficLight.bump/1)
+    end
+
+    def bump(step), do: ExMachine.Step.update(step, :cycles, &(&1 + 1))
   end
 
-  def fun1(ctx), do: ctx
-  def fun2(ctx), do: ctx
-  def fun3(ctx), do: ctx
-  def fun4(ctx), do: ctx
+  defmodule Hierarchical do
+    @moduledoc false
+    use ExMachine.Statechart
 
-  def fun5(ctx) do
-    import ExMachine.Context
+    initial(:idle)
 
-    ctx
-    |> raise_event("tack")
+    state :idle do
+      on(:start, target: :running)
+    end
+
+    state :running do
+      initial(:slow)
+      on(:stop, target: :idle)
+
+      state :slow do
+        on(:go_fast, target: :fast)
+      end
+
+      state :fast do
+        on(:go_slow, target: :slow)
+      end
+    end
   end
 
-  def fun6(ctx) do
-    import ExMachine.Context
+  defmodule WithFinal do
+    @moduledoc false
+    use ExMachine.Statechart
 
-    ctx
-    |> put(:hello, "world")
-    |> raise_event("tuck")
+    initial(:alive)
+
+    state :alive do
+      on(:die, target: :dead)
+    end
+
+    final(:dead)
   end
 
-  test "invalid definition" do
-    assert_raise(Statechart.InvalidDefinition, fn ->
-      Statechart.build(%{})
-    end)
+  defmodule WithChoice do
+    @moduledoc false
+    use ExMachine.Statechart
+
+    initial(:start)
+
+    state :start do
+      on(:decide, target: :router)
+    end
+
+    state(:allowed)
+    state(:denied)
+
+    choice :router do
+      cond_branch(&__MODULE__.allowed?/1, target: :allowed)
+      otherwise(target: :denied)
+    end
+
+    def allowed?(ctx), do: Map.get(ctx, :allowed, false)
   end
 
-  test "invalid empty definition" do
-    assert_raise(Statechart.InvalidDefinition, fn ->
-      Statechart.build(%State{})
-    end)
+  defmodule ParallelMachine do
+    @moduledoc false
+    use ExMachine.Statechart, type: :parallel
+
+    region :speed, initial: :slow do
+      state(:slow, do: on(:go, target: :fast))
+      state(:fast)
+    end
+
+    region :wipers, initial: :off do
+      state(:off, do: on(:rain, target: :on))
+      state(:on)
+    end
   end
 
-  test "not valid initial state" do
-    definition = %State{
-      substates: %{
-        "s1" => %State{},
-        "s2" => %State{}
-      }
-    }
+  defmodule WithHistory do
+    @moduledoc false
+    use ExMachine.Statechart
 
-    assert_raise(Statechart.NotValidInitial, fn ->
-      Statechart.build(definition)
-    end)
+    initial(:off)
+
+    state :off do
+      on(:switch_on, target: :on)
+    end
+
+    state :on do
+      initial(:idle)
+      on(:switch_off, target: :off)
+
+      history(:hist, type: :deep, default: :idle)
+
+      state(:idle, do: on(:work, target: :busy))
+      state(:busy)
+    end
   end
 
-  # @tag :skip
-  # test "invalid duplicate states" do
-  #   definition = %State{
-  #     initial: "s1",
-  #     substates: %{
-  #       "s1" => %State{},
-  #       "s2" => %State{
-  #         initial: "s1",
-  #         substates: %{"s1" => %State{}}
-  #       }
-  #     }
-  #   }
-  #
-  #   assert_raise(Statechart.DuplicatedState, fn ->
-  #     Statechart.build(definition)
-  #   end)
-  # end
+  # ── Tests ─────────────────────────────────────────────────────────────────
 
-  test "valid definition" do
-    statechart = Statechart.build(valid_definition())
-    assert Enum.count(statechart.states) == 7
-    assert statechart.states["s12"].name == "s12"
+  describe "TrafficLight" do
+    test "compiles and exposes a definition" do
+      def_ = TrafficLight.__statechart__()
+      assert %Definition{} = def_
+      assert def_.root == :traffic_light
+      assert def_.initial_context == %{cycles: 0}
+    end
+
+    test "root is compound with three atomic substates" do
+      def_ = TrafficLight.__statechart__()
+      root = Definition.fetch!(def_, def_.root)
+      assert root.kind == :compound
+      assert root.initial == :red
+      assert root.substates == [:red, :green, :yellow]
+
+      for id <- [:red, :green, :yellow] do
+        assert Definition.fetch!(def_, id).kind == :atomic
+      end
+    end
+
+    test "yellow's transition has an action" do
+      def_ = TrafficLight.__statechart__()
+
+      assert [%Transition{event: :timer, target: :red, action: act}] =
+               Definition.fetch!(def_, :yellow).transitions
+
+      assert is_function(act, 1)
+    end
   end
 
-  test "get_descendants/2" do
-    statechart = Statechart.build(valid_definition())
-    assert MapSet.size(Statechart.get_descendants(statechart, "root")) == 6
-    assert MapSet.size(Statechart.get_descendants(statechart, "s1")) == 3
-    assert MapSet.size(Statechart.get_descendants(statechart, "s2")) == 0
+  describe "Hierarchical" do
+    test "running is compound with two atomic substates" do
+      def_ = Hierarchical.__statechart__()
+      running = Definition.fetch!(def_, :running)
+      assert running.kind == :compound
+      assert running.initial == :slow
+      assert running.substates == [:slow, :fast]
+    end
 
-    assert MapSet.equal?(
-             Statechart.get_descendants(statechart, "root"),
-             MapSet.new(["s11", "s12", "s2", "s1", "exit", "s3"])
-           )
+    test "ancestors of :fast" do
+      def_ = Hierarchical.__statechart__()
+      assert Definition.ancestors(def_, :fast) == [:running, :hierarchical]
+    end
+
+    test "descendants of :running" do
+      def_ = Hierarchical.__statechart__()
+      assert Definition.descendants(def_, :running) == MapSet.new([:slow, :fast])
+    end
   end
 
-  test "get_ancestors/2" do
-    statechart = Statechart.build(valid_definition())
-    assert Statechart.get_ancestors(statechart, "s12") == ["s1", "root"]
-    assert statechart.states["s12"].name == "s12"
+  describe "WithFinal" do
+    test "final is recognised" do
+      def_ = WithFinal.__statechart__()
+      assert Definition.fetch!(def_, :dead).kind == :final
+    end
   end
 
-  test "get_initials/2" do
-    statechart = Statechart.build(valid_definition())
-    assert Statechart.get_initials(statechart, "root") == ["root", "s1", "s11"]
-    assert Statechart.get_initials(statechart, "s11") == ["s11"]
+  describe "WithChoice" do
+    test "choice node carries branches in declaration order" do
+      def_ = WithChoice.__statechart__()
+      router = Definition.fetch!(def_, :router)
+      assert router.kind == :choice
+
+      assert [
+               {guard, :allowed},
+               {nil, :denied}
+             ] = router.choice_branches
+
+      assert is_function(guard, 1)
+      assert guard.(%{allowed: true}) == true
+      assert guard.(%{allowed: false}) == false
+    end
   end
 
-  test "get_entry_actions/2" do
-    statechart = Statechart.build(valid_definition())
+  describe "ParallelMachine" do
+    test "root is parallel with two regions" do
+      def_ = ParallelMachine.__statechart__()
+      root = Definition.fetch!(def_, def_.root)
+      assert root.kind == :parallel
+      assert root.substates == [:speed, :wipers]
+    end
 
-    assert Statechart.get_entry_actions(statechart, ["root", "s1", "s11"]) == [
-             &StatechartTest.fun1/1,
-             &StatechartTest.fun2/1
-           ]
-
-    assert Statechart.get_entry_actions(statechart, ["s11"]) == [&StatechartTest.fun2/1]
+    test "each region has its initial substate" do
+      def_ = ParallelMachine.__statechart__()
+      assert Definition.fetch!(def_, :speed).kind == :region
+      assert Definition.fetch!(def_, :speed).initial == :slow
+      assert Definition.fetch!(def_, :wipers).kind == :region
+      assert Definition.fetch!(def_, :wipers).initial == :off
+    end
   end
 
-  test "get_exit_actions/2" do
-    statechart = Statechart.build(valid_definition())
-
-    assert Statechart.get_exit_actions(statechart, ["s11", "s1", "root"]) == [
-             &StatechartTest.fun4/1,
-             &StatechartTest.fun3/1
-           ]
-
-    assert Statechart.get_exit_actions(statechart, ["s11"]) == [&StatechartTest.fun4/1]
+  describe "WithHistory" do
+    test "history pseudostate carries type and default" do
+      def_ = WithHistory.__statechart__()
+      hist = Definition.fetch!(def_, :hist)
+      assert hist.kind == :history
+      assert hist.history_type == :deep
+      assert hist.history_default == :idle
+      assert hist.parent == :on
+    end
   end
 
-  test "get_transition_for/3" do
-    statechart = Statechart.build(valid_definition())
-    assert Statechart.get_transition_for(statechart, "s1", "tick")
-    assert Statechart.get_transition_for(statechart, "s2", "tock")
-    refute Statechart.get_transition_for(statechart, "s2", "tick")
+  describe "compile-time errors" do
+    test "duplicate state id raises" do
+      assert_raise ArgumentError, ~r/duplicate state id/, fn ->
+        defmodule Duped do
+          use ExMachine.Statechart
+          initial(:a)
+          state(:a)
+          state(:a)
+        end
+      end
+    end
 
-    assert is_map(Statechart.get_transition_for(statechart, "s1", "tick"))
-  end
+    test "missing :initial raises during validation" do
+      assert_raise ExMachine.Definition.Error, ~r/has no :initial/, fn ->
+        defmodule NoInitial do
+          use ExMachine.Statechart
+          state(:a)
+          state(:b)
+        end
+      end
+    end
 
-  test "find_lcca/2" do
-    statechart = Statechart.build(valid_definition())
-    assert Statechart.find_lcca(statechart, ["s1", "s2"]) == "root"
-    assert Statechart.find_lcca(statechart, ["s11", "s12"]) == "s1"
-    assert Statechart.find_lcca(statechart, ["s12", "s2"]) == "root"
-    assert Statechart.find_lcca(statechart, ["s12", "root"]) == nil
+    test "unknown transition target raises" do
+      assert_raise ExMachine.Definition.Error, ~r/targets unknown state/, fn ->
+        defmodule BadTarget do
+          use ExMachine.Statechart
+          initial(:a)
+          state(:a, do: on(:x, target: :ghost))
+        end
+      end
+    end
   end
 end
