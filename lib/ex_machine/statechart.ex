@@ -11,9 +11,9 @@ defmodule ExMachine.Statechart do
   A compiled statechart contains:
 
   - `states` - A flattened map of all states in the hierarchy with their full paths
-  
+
   The statechart compiler takes a nested `State` definition and:
-  
+
   1. Validates the state machine structure
   2. Flattens the hierarchy into addressable state paths  
   3. Validates all transitions reference valid states
@@ -23,7 +23,7 @@ defmodule ExMachine.Statechart do
   ## State Addressing
 
   States in a statechart are addressed using dot notation paths:
-  
+
   - `"root"` - The root state
   - `"root.playing"` - A top-level state called "playing"  
   - `"root.playing.normal_speed"` - A nested state "normal_speed" inside "playing"
@@ -32,7 +32,7 @@ defmodule ExMachine.Statechart do
 
   The active configuration represents which states are currently active.
   Due to hierarchical composition, multiple states can be active simultaneously.
-  
+
   For example, if a media player is in "normal speed" mode:
   - Configuration: `[["normal_speed", "playing", "root"]]`
   - Active states: "normal_speed", "playing", and "root"
@@ -150,9 +150,7 @@ defmodule ExMachine.Statechart do
     def exception({initial, state_name}) do
       %__MODULE__{
         message:
-          "Initial state \"#{initial}\" is not valid or not a descendant of composite state \"#{
-            state_name
-          }\""
+          "Initial state \"#{initial}\" is not valid or not a descendant of composite state \"#{state_name}\""
       }
     end
   end
@@ -251,7 +249,10 @@ defmodule ExMachine.Statechart do
   end
 
   defp check_history(state_definition, children, substates_def) do
-    if Enum.any?(children, &(substates_def[&1][:type] == :deep or substates_def[&1][:type] == :shallow)) do
+    if Enum.any?(
+         children,
+         &(substates_def[&1][:type] == :deep or substates_def[&1][:type] == :shallow)
+       ) do
       Map.put(state_definition, :history?, true)
     else
       Map.put(state_definition, :history?, false)

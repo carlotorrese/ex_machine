@@ -283,6 +283,7 @@ defmodule ExMachine.Machine do
   defp save_state_configuration(machine, state_name) do
     if machine.statechart.states[state_name].history? do
       config = get_state_config(machine.configuration, state_name)
+
       machine
       |> put_in_history(state_name, config)
     else

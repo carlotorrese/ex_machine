@@ -4,5 +4,4 @@ defmodule ContextTest do
   import ExMachine.Context
 
   doctest ExMachine.Context
-
 end

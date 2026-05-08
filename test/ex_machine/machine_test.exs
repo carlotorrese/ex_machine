@@ -259,6 +259,5 @@ defmodule MachineTest do
     # assert machine.configuration == [["s2", "root"]]
     # machine = Machine.dispatch(machine, "s")
     # assert machine.configuration == [["s121", "s12", "s1", "root"]]
-
   end
 end
