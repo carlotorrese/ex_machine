@@ -353,12 +353,31 @@ defmodule ExMachine.Server do
   # Apply the side-effect requests (delayed events, invocations,
   # cancellations) accumulated during the most recent init/dispatch, plus
   # auto-cancel any timer/task whose owner state was exited.
+  #
+  # Pending entries are FILTERED before scheduling: if an action requested
+  # a timer/invocation while inside a state that was then exited later in
+  # the same macrostep (e.g. via an eventless chain or a raised event),
+  # we must not schedule the orphan in the first place. Same for entries
+  # whose ref/id appears in `machine.pending_cancels`.
   defp process_side_effects(%State{} = state, %Machine{} = machine) do
+    exited_set = MapSet.new(machine.trace.exited)
+    cancels_set = MapSet.new(machine.pending_cancels)
+
+    delayed_to_schedule =
+      Enum.reject(machine.pending_delayed, fn {ref, _ev, _ms, owner} ->
+        MapSet.member?(exited_set, owner) or MapSet.member?(cancels_set, ref)
+      end)
+
+    invokes_to_spawn =
+      Enum.reject(machine.pending_invokes, fn {id, _spec, owner} ->
+        MapSet.member?(exited_set, owner) or MapSet.member?(cancels_set, id)
+      end)
+
     state
     |> apply_explicit_cancels(machine.pending_cancels)
     |> auto_cancel_on_exit(machine.trace)
-    |> schedule_delayed(machine.pending_delayed)
-    |> spawn_invocations(machine.pending_invokes)
+    |> schedule_delayed(delayed_to_schedule)
+    |> spawn_invocations(invokes_to_spawn)
   end
 
   defp apply_explicit_cancels(%State{} = state, []), do: state
