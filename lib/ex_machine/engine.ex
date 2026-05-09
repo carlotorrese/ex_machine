@@ -381,7 +381,14 @@ defmodule ExMachine.Engine do
     parent_chain = ancestors_to_parent ++ [parent_id]
     restore_chain = history_restore_chain(def_, hist_node, histories)
     base_entry = parent_chain ++ restore_chain
-    siblings = parallel_sibling_chains(def_, ancestors_to_parent, base_entry)
+
+    siblings =
+      parallel_sibling_chains(
+        def_,
+        ancestors_with_lcca(def_, lcca, ancestors_to_parent),
+        base_entry
+      )
+
     {exit_chain, base_entry ++ siblings}
   end
 
@@ -408,24 +415,27 @@ defmodule ExMachine.Engine do
 
   defp compute_lcca(def_, source, target, :external), do: lcca_external(def_, source, target)
 
-  # Least Common Compound Ancestor for an external transition: the deepest
-  # proper ancestor of `source` that also has `target` as a proper
-  # descendant. Per SCXML §3.13, the LCCA must have BOTH source AND target
-  # as descendants; in particular, the LCCA can never be the target itself
-  # (a state is not its own descendant), so we test descendant membership
-  # only. `Definition.descendants/2` returns strict descendants.
-  #
-  # The `nil` case is unreachable for any definition that passes
-  # `Definition.validate!/1`: every transition's source has at least one
-  # ancestor (root-source transitions are rejected at compile time, see
-  # Definition.check_no_root_source_transitions!/1), and every ancestor
-  # chain ultimately reaches the root which has every node as descendant.
+  # Least Common Compound Ancestor for an external transition. Per SCXML
+  # §3.13 `findLCCA`, the algorithm prefers a `:state`/`:region`/`:scxml`
+  # ancestor over a `:parallel` one — picking a parallel as the LCCA
+  # would cause cross-region transitions to evict every region at exit
+  # time while only re-entering the on-path region, stranding the
+  # siblings. We therefore look for the deepest NON-parallel ancestor
+  # that has `target` as a descendant; only if none exists (cross-region
+  # transition in a top-level parallel root) do we fall back to the
+  # parallel itself. `compute_entry_chain/3` then makes sure
+  # `parallel_sibling_chains/3` is invoked on the parallel-LCCA so every
+  # region is re-populated.
   defp lcca_external(def_, source, target) do
-    source_ancestors = Definition.ancestors(def_, source)
+    candidates =
+      Definition.ancestors(def_, source)
+      |> Enum.filter(fn ancestor ->
+        MapSet.member?(Definition.descendants(def_, ancestor), target)
+      end)
 
-    Enum.find(source_ancestors, fn ancestor ->
-      MapSet.member?(Definition.descendants(def_, ancestor), target)
-    end) ||
+    Enum.find(candidates, fn ancestor ->
+      Definition.fetch!(def_, ancestor).kind != :parallel
+    end) || List.first(candidates) ||
       raise "could not compute LCCA for #{inspect(source)} → #{inspect(target)}; " <>
               "the definition should have been rejected by Definition.validate!/1"
   end
@@ -445,13 +455,31 @@ defmodule ExMachine.Engine do
   # already starts with `target` itself). For every `:parallel` ancestor
   # on the path, the initial chains of its other regions are appended so
   # the parallel is fully entered, not half-entered (SCXML's
-  # `addAncestorStatesToEnter`).
+  # `addAncestorStatesToEnter`). When the LCCA itself is a `:parallel`
+  # (top-level parallel root with a cross-region transition), the LCCA
+  # is included in the ancestors walked by `parallel_sibling_chains` so
+  # its sibling regions get re-entered too — `ancestors_until` is
+  # exclusive of the LCCA, so we add it manually.
   defp compute_entry_chain(def_, lcca, target) do
     ancestors_path = target |> ancestors_until(def_, lcca) |> Enum.reverse()
     target_chain = Configuration.initial_chain(def_, target)
     base_entry = ancestors_path ++ target_chain
-    siblings = parallel_sibling_chains(def_, ancestors_path, base_entry)
+
+    siblings =
+      parallel_sibling_chains(def_, ancestors_with_lcca(def_, lcca, ancestors_path), base_entry)
+
     base_entry ++ siblings
+  end
+
+  # Prepend the LCCA to `ancestors_path` if (and only if) it is itself a
+  # parallel — the only case where its sibling regions need re-population.
+  defp ancestors_with_lcca(_def, nil, ancestors_path), do: ancestors_path
+
+  defp ancestors_with_lcca(def_, lcca, ancestors_path) do
+    case Definition.fetch!(def_, lcca).kind do
+      :parallel -> [lcca | ancestors_path]
+      _ -> ancestors_path
+    end
   end
 
   # For each `:parallel` ancestor on `ancestors_path`, append the
