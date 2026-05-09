@@ -29,6 +29,42 @@ defmodule ExMachine.Visualize.MermaidTest.Nested do
   end
 end
 
+defmodule ExMachine.Visualize.MermaidTest.ParallelRoot do
+  @moduledoc false
+  # Regression for bug_007: a parallel root must be wrapped in
+  # `state Root { ... }` so the `--` separator sits inside a state
+  # block, where Mermaid's stateDiagram-v2 grammar accepts it.
+
+  use ExMachine.Statechart, type: :parallel
+
+  region :left do
+    initial(:la)
+    state(:la)
+  end
+
+  region :right do
+    initial(:ra)
+    state(:ra)
+  end
+end
+
+defmodule ExMachine.Visualize.MermaidTest.ActionOnly do
+  @moduledoc false
+  # Regression for bug_003: an action-only transition (target: nil)
+  # must not be rendered as `Source --> [*]`, which Mermaid reads as
+  # "transitions to the end pseudostate". Render as a self-loop.
+
+  use ExMachine.Statechart
+
+  initial(:running)
+
+  state :running do
+    on(:tick, action: &__MODULE__.bump/1, type: :internal)
+  end
+
+  def bump(s), do: s
+end
+
 defmodule ExMachine.Visualize.MermaidTest.Workflow do
   @moduledoc false
   use ExMachine.Statechart
@@ -61,7 +97,7 @@ defmodule ExMachine.Visualize.MermaidTest do
   use ExUnit.Case, async: true
 
   alias ExMachine.Visualize
-  alias ExMachine.Visualize.MermaidTest.{Flat, Nested, Workflow}
+  alias ExMachine.Visualize.MermaidTest.{ActionOnly, Flat, Nested, ParallelRoot, Workflow}
 
   test "flat FSM renders one initial arrow plus one line per transition" do
     out = Visualize.to_mermaid(Flat)
@@ -99,5 +135,30 @@ defmodule ExMachine.Visualize.MermaidTest do
     # final targets become [*]
     assert out =~ "la --> [*]: done_l"
     assert out =~ "ra --> [*]: done_r"
+  end
+
+  describe "regression: bug_007 — parallel root wrapped in a state block" do
+    test "a parallel root nests its regions inside `state Root { ... }`" do
+      out = Visualize.to_mermaid(ParallelRoot)
+
+      assert out =~ "[*] --> parallel_root"
+      assert out =~ "state parallel_root {"
+      assert out =~ "    state left {"
+      assert out =~ "    state right {"
+      # The -- separator must sit INSIDE the wrapper (level 2), not at
+      # the top of the diagram (level 1).
+      assert out =~ ~r/^    --$/m
+      refute out =~ ~r/^  --$/m
+    end
+  end
+
+  describe "regression: bug_003 — action-only transitions render as self-loops" do
+    test "target: nil renders Source --> Source, not Source --> [*]" do
+      out = Visualize.to_mermaid(ActionOnly)
+
+      # The transition is internal action-only on :running.
+      assert out =~ "running --> running: tick /action (internal)"
+      refute out =~ "running --> [*]"
+    end
   end
 end

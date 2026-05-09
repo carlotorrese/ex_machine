@@ -62,6 +62,37 @@ defmodule ExMachine.Visualize.ScxmlTest.ParallelRoot do
   end
 end
 
+defmodule ExMachine.Visualize.ScxmlTest.HistoryNoDefault do
+  @moduledoc false
+  # Regression for bug_002: <history> emits MUST contain a child
+  # <transition target="..."/> per W3C SCXML XSD. When :default is
+  # omitted, the renderer must fall back to parent.initial.
+
+  use ExMachine.Statechart
+  initial(:idle)
+
+  state(:idle, do: on(:resume, target: :h))
+
+  state :playing do
+    initial(:slow)
+    history(:h, type: :shallow)
+    state(:slow)
+    state(:fast)
+  end
+end
+
+defmodule ExMachine.Visualize.ScxmlTest.AmpEvent do
+  @moduledoc false
+  # Regression for bug_004: an event atom containing an XML
+  # metacharacter (&, <, >, ") must be escaped in the
+  # `event="..."` attribute.
+
+  use ExMachine.Statechart
+  initial(:a)
+  state(:a, do: on(:"a&b", target: :z))
+  state(:z)
+end
+
 defmodule ExMachine.Visualize.ScxmlTest.WithHistory do
   @moduledoc false
   use ExMachine.Statechart
@@ -83,7 +114,16 @@ defmodule ExMachine.Visualize.ScxmlTest do
   use ExUnit.Case, async: true
 
   alias ExMachine.Visualize
-  alias ExMachine.Visualize.ScxmlTest.{Flat, Nested, ParallelRoot, WithHistory, Workflow}
+
+  alias ExMachine.Visualize.ScxmlTest.{
+    AmpEvent,
+    Flat,
+    HistoryNoDefault,
+    Nested,
+    ParallelRoot,
+    WithHistory,
+    Workflow
+  }
 
   test "flat FSM emits a top-level <scxml initial=...> with one <state> per node" do
     out = Visualize.to_scxml(Flat)
@@ -117,6 +157,26 @@ defmodule ExMachine.Visualize.ScxmlTest do
     assert out =~ ~s(<history id="h" type="deep">)
     assert out =~ ~s(<transition target="fast"/>)
     assert out =~ "</history>"
+  end
+
+  describe "regression: bug_002 — history emits a default <transition>" do
+    test "history without :default falls back to the parent's :initial" do
+      out = Visualize.to_scxml(HistoryNoDefault)
+      # The history sits inside :playing whose :initial is :slow.
+      assert out =~ ~s(<history id="h" type="shallow">)
+      assert out =~ ~s(<transition target="slow"/>)
+      assert out =~ "</history>"
+      # The previous (broken) output emitted an empty <history></history>.
+      refute out =~ ~r/<history[^>]*>\s*<\/history>/
+    end
+  end
+
+  describe "regression: bug_004 — event attribute is XML-escaped" do
+    test "an event with `&` in its name is escaped as &amp;" do
+      out = Visualize.to_scxml(AmpEvent)
+      assert out =~ ~s(event="a&amp;b")
+      refute out =~ ~s(event="a&b")
+    end
   end
 
   describe "regression: bug_003 — parallel root wrapper" do

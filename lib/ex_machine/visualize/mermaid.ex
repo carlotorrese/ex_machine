@@ -42,8 +42,15 @@ defmodule ExMachine.Visualize.Mermaid do
     render_compound_body(root, def_, 1) ++ render_transitions(root, def_, 1)
   end
 
+  # A parallel root MUST be rendered as a wrapping `state Root { ... }`
+  # block: Mermaid's `--` separator is grammatically valid only INSIDE a
+  # state block, never at the top level. Without the wrapper the
+  # diagram either fails to parse or silently reads as a sequential
+  # composition.
   defp render_root(%StateNode{kind: :parallel} = root, def_) do
-    render_parallel_body(root, def_, 1) ++ render_transitions(root, def_, 1)
+    [indent(1, "[*] --> #{name(root.id)}")] ++
+      block(root, render_parallel_body(root, def_, 2), 1) ++
+      render_transitions(root, def_, 1)
   end
 
   # ── Bodies (the contents of a `state X { ... }` block) ───────────────────
@@ -118,7 +125,7 @@ defmodule ExMachine.Visualize.Mermaid do
   end
 
   defp render_transition(source_id, transition, def_, level) do
-    target_label = target_repr(transition.target, def_)
+    target_label = target_repr(transition.target, source_id, def_)
     label = transition_label(transition)
 
     line =
@@ -130,9 +137,13 @@ defmodule ExMachine.Visualize.Mermaid do
     indent(level, line)
   end
 
-  defp target_repr(nil, _def_), do: "[*]"
+  # `target: nil` is a documented action-only transition (no state
+  # change). We render it as a self-loop so the diagram doesn't suggest
+  # the source terminates — `[*]` on the right of an arrow is reserved
+  # for transitions targeting a :final state.
+  defp target_repr(nil, source_id, _def_), do: name(source_id)
 
-  defp target_repr(target_id, def_) do
+  defp target_repr(target_id, _source_id, def_) do
     case Definition.fetch!(def_, target_id).kind do
       :final -> "[*]"
       _ -> name(target_id)

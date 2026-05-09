@@ -105,19 +105,19 @@ defmodule ExMachine.Visualize.Scxml do
     [indent(level, ~s(<final id="#{name(node.id)}"/>))]
   end
 
-  defp render_node(%StateNode{kind: :history} = node, _def_, level) do
+  defp render_node(%StateNode{kind: :history} = node, def_, level) do
     type = Atom.to_string(node.history_type || :shallow)
     open = indent(level, ~s(<history id="#{name(node.id)}" type="#{type}">))
 
-    inner =
-      case node.history_default do
-        nil ->
-          []
+    # SCXML XSD requires exactly one <transition> child specifying the
+    # default substate. When no `:default` is declared we fall back to
+    # the parent's `:initial`, matching the engine's runtime behaviour
+    # in default_restore_chain/2.
+    default_target =
+      node.history_default ||
+        Definition.fetch!(def_, node.parent).initial
 
-        default ->
-          [indent(level + 1, ~s(<transition target="#{name(default)}"/>))]
-      end
-
+    inner = [indent(level + 1, ~s(<transition target="#{name(default_target)}"/>))]
     close = indent(level, "</history>")
     [open] ++ inner ++ [close]
   end
@@ -164,7 +164,7 @@ defmodule ExMachine.Visualize.Scxml do
   defp render_transition(%Transition{} = t, level) do
     attrs =
       [
-        if(t.event, do: ~s( event="#{t.event}"), else: nil),
+        if(t.event, do: ~s( event="#{escape_attr(Atom.to_string(t.event))}"), else: nil),
         if(t.target, do: ~s( target="#{name(t.target)}"), else: nil),
         if(t.type == :internal, do: ~s( type="internal"), else: nil)
       ]
