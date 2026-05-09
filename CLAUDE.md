@@ -91,6 +91,12 @@ test/ex_machine/
   Auto-cancellation of timers and tasks fires when the owner state is
   exited (driven by `machine.trace.exited`). After a terminal config
   the server stays alive but refuses events.
+- **Visualisation (M8) is read-only.** `ExMachine.Visualize.to_mermaid/2`
+  and `to_scxml/2` accept a module or a `%Definition{}`, never start a
+  machine, and have no side effects — safe at compile time. Mermaid
+  uses `stateDiagram-v2` with `<<history>>` / `<<choice>>` markers and
+  `[*]` for final endpoints; SCXML emits W3C-conforming XML. Choice
+  has no SCXML equivalent and is emitted as a comment.
 - **`mix.exs` declares `mod: {ExMachine.Application, []}`.** The app
   supervisor brings up `Registry` named `ExMachine.PubSub` (keys:
   `:duplicate`). Library users do not need to add anything to their own
