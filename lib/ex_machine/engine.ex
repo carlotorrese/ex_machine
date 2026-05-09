@@ -6,43 +6,46 @@ defmodule ExMachine.Engine do
   in itself: every public function takes a `Machine` value and returns a new
   one, never reading or writing process dictionary or globals.
 
-  ## Algorithm overview (M3 + M4 subset)
+  ## Algorithm overview (M3-M5 subset)
 
-  Milestones M3-M4 support atomic, compound, and final states with
-  event-driven and eventless transitions, run-to-completion,
-  `done.state.<id>` events, internal transitions, choice and history
-  pseudostates. Parallel regions arrive in M5; their structural data is
-  already validated by the DSL but the engine raises if asked to execute
-  a parallel substate.
+  The engine handles atomic, compound, parallel, region, and final states;
+  event-driven and eventless transitions; run-to-completion;
+  `done.state.<id>` events including bubble-up across parallel regions;
+  internal transitions; choice and history pseudostates. Server-mode and
+  delayed/invoked services are out of scope (M6-M7).
 
   ### Run-to-completion (`run_to_completion/1`)
 
   After every external `dispatch/2`, and at the end of `init/1`:
 
       loop:
-        if an eventless transition is enabled:
-          microstep with that transition
+        if any eventless transitions are enabled:
+          select them (one per active atomic), remove conflicts,
+          microstep with the surviving set
           continue loop
         if there is an internal raised event in the queue:
           pop it, microstep against it
           continue loop
         return machine
 
-  ### Microstep (`microstep/4`)
+  ### Microstep
 
-  A single transition application:
+  A microstep applies a *set* of non-conflicting transitions atomically:
 
-    1. Compute LCCA(source, target) — the least state that has both as
-       descendants (or `nil` for action-only transitions).
-    2. exit_set = active states that are descendants of LCCA, deepest first.
-    3. entry_set = ancestors of target up to (excluding) LCCA, parent-first,
-       followed by the initial chain from target.
-    4. Run `on_exit` actions (exit_set order), then transition action, then
-       `on_entry` actions (entry_set order). Each receives and returns an
-       `ExMachine.Step`.
-    5. Update configuration, drain raised events into the machine queue.
-    6. If the entered leaf is `:final`, emit `done.state.<parent>`. If the
-       parent is the root, the machine stops running.
+    1. For each active atomic state, walk its ancestor chain looking for
+       the first transition whose event matches and whose guard passes.
+    2. Reduce the resulting set with `remove_conflicting/2`: if two
+       transitions' exit sets overlap, the one whose source is deeper in
+       the tree wins; ties are broken by document order (set selection
+       order).
+    3. For each surviving transition: resolve choice/history, compute
+       (exit_chain, entry_chain) via LCCA, then UNION across transitions.
+    4. Snapshot history slots whose composite is in the combined exit set.
+    5. Run `on_exit` actions (deepest-first), then every transition's
+       action (in selection order), then `on_entry` actions (parent-first).
+    6. Update configuration; drain raised events; emit `done.state.<id>`
+       for any composite or parallel that just completed (recursive
+       bubble-up). If the root is now in a terminal configuration, stop.
 
   ## Public API
 
@@ -71,9 +74,9 @@ defmodule ExMachine.Engine do
       machine.context
       |> Step.new(nil)
       |> apply_actions(entry_actions(def_, chain))
-      |> then(&maybe_emit_done(def_, chain, &1))
+      |> then(&emit_done_events(def_, chain, config, &1))
 
-    micro = %Microstep{event: nil, transition: nil, exited: [], entered: chain}
+    micro = %Microstep{event: nil, transitions: [], exited: [], entered: chain}
     trace = Trace.new(nil) |> Trace.push(micro)
 
     machine =
@@ -81,7 +84,7 @@ defmodule ExMachine.Engine do
         machine
         | configuration: config,
           context: step.context,
-          running?: not stopped_after_entering?(def_, chain),
+          running?: not stopped?(def_, config),
           queue: machine.queue ++ step.raised,
           trace: trace
       }
@@ -123,14 +126,9 @@ defmodule ExMachine.Engine do
   defp run_to_completion(%Machine{running?: false} = machine), do: machine
 
   defp run_to_completion(machine) do
-    case find_eventless(machine) do
-      {source, transition} ->
-        machine
-        |> microstep(source, transition, nil)
-        |> run_to_completion()
-
-      nil ->
-        drain_queue(machine)
+    case select_eventless(machine) do
+      [] -> drain_queue(machine)
+      transitions -> machine |> microstep(transitions, nil) |> run_to_completion()
     end
   end
 
@@ -147,39 +145,106 @@ defmodule ExMachine.Engine do
   # ── Event processing ──────────────────────────────────────────────────────
 
   defp process_event(%Machine{} = machine, event) do
-    case find_transition(machine, event) do
-      nil -> machine
-      {source, transition} -> microstep(machine, source, transition, event)
+    case select_transitions(machine, event) do
+      [] -> machine
+      transitions -> microstep(machine, transitions, event)
     end
   end
 
-  # Walk every active atomic state's ancestor chain (atomic itself first), pick
-  # the first transition that matches and whose guard passes. Atomic-state
-  # ordering is deterministic via `Configuration.atomic_states/2`.
-  defp find_transition(%Machine{} = machine, event) do
-    do_find_transition(machine, fn t -> match_event?(t, event) end)
+  # For each active atomic state, walk the ancestor chain and pick the first
+  # transition that matches the predicate and whose guard passes. Combine
+  # the per-atomic picks and remove conflicts. Returns a list of
+  # `{source_id, %Transition{}}` pairs in atomic-state order (source-deepest
+  # is preserved by remove_conflicting/2).
+  defp select_transitions(%Machine{} = machine, event) do
+    select_enabled(machine, fn t -> match_event?(t, event) end)
   end
 
-  defp find_eventless(%Machine{} = machine) do
-    do_find_transition(machine, &Transition.eventless?/1)
+  defp select_eventless(%Machine{} = machine) do
+    select_enabled(machine, &Transition.eventless?/1)
   end
 
-  defp do_find_transition(%Machine{} = machine, predicate) do
-    Configuration.atomic_states(machine.configuration, machine.definition)
-    |> Enum.find_value(fn atomic ->
-      ids_to_check = [atomic | Definition.ancestors(machine.definition, atomic)]
-
-      Enum.find_value(ids_to_check, fn id ->
-        machine.definition
-        |> Definition.fetch!(id)
-        |> Map.fetch!(:transitions)
-        |> Enum.find(fn t -> predicate.(t) and guard_passes?(t, machine.context) end)
-        |> case do
-          nil -> nil
-          transition -> {id, transition}
-        end
-      end)
+  defp select_enabled(%Machine{} = machine, predicate) do
+    machine.configuration
+    |> Configuration.atomic_states(machine.definition)
+    |> Enum.flat_map(fn atomic ->
+      case first_enabled_in_chain(machine, atomic, predicate) do
+        nil -> []
+        pair -> [pair]
+      end
     end)
+    |> remove_conflicting(machine)
+  end
+
+  defp first_enabled_in_chain(%Machine{} = machine, atomic, predicate) do
+    ids_to_check = [atomic | Definition.ancestors(machine.definition, atomic)]
+
+    Enum.find_value(ids_to_check, fn id ->
+      machine.definition
+      |> Definition.fetch!(id)
+      |> Map.fetch!(:transitions)
+      |> Enum.find(fn t -> predicate.(t) and guard_passes?(t, machine.context) end)
+      |> case do
+        nil -> nil
+        transition -> {id, transition}
+      end
+    end)
+  end
+
+  # SCXML remove_conflicting: walk the selection in order; keep a transition
+  # only if it does not conflict with any already-kept transition. When two
+  # conflict, the deeper-source one wins (it dominates the shallower one,
+  # which is then removed from the kept set).
+  defp remove_conflicting([], _machine), do: []
+
+  defp remove_conflicting(transitions, %Machine{} = machine) do
+    Enum.reduce(transitions, [], fn t1, kept ->
+      {kept_after, conflict?} =
+        Enum.reduce(kept, {[], false}, fn t2, acc -> reconcile(t1, t2, acc, machine) end)
+
+      kept_reversed = Enum.reverse(kept_after)
+      if conflict?, do: kept_reversed, else: kept_reversed ++ [t1]
+    end)
+  end
+
+  # Decide whether the kept-set entry `t2` should survive the addition of
+  # `t1`. Returns the updated `{accumulator, t1_already_lost?}` pair so the
+  # outer reduce can short-circuit further checks once t1 has lost.
+  defp reconcile(_t1, t2, {acc, true}, _machine), do: {[t2 | acc], true}
+
+  defp reconcile(t1, t2, {acc, false}, machine) do
+    cond do
+      not transitions_conflict?(t1, t2, machine) -> {[t2 | acc], false}
+      source_descendant?(t1, t2, machine.definition) -> {acc, false}
+      true -> {[t2 | acc], true}
+    end
+  end
+
+  defp transitions_conflict?(t1, t2, %Machine{} = machine) do
+    e1 = exit_set_for(t1, machine)
+    e2 = exit_set_for(t2, machine)
+    not MapSet.disjoint?(MapSet.new(e1), MapSet.new(e2))
+  end
+
+  defp exit_set_for({_source, %Transition{target: nil}}, _machine), do: []
+
+  defp exit_set_for({source, %Transition{} = transition}, %Machine{} = machine) do
+    %Machine{definition: def_, configuration: config, context: ctx} = machine
+    target = resolve_choice(def_, transition.target, ctx)
+
+    case Definition.fetch!(def_, target).kind do
+      :history ->
+        parent_id = Definition.fetch!(def_, target).parent
+        compute_exit_chain(def_, config, lcca_external(def_, source, parent_id))
+
+      _ ->
+        lcca = compute_lcca(def_, source, target, transition.type)
+        compute_exit_chain(def_, config, lcca)
+    end
+  end
+
+  defp source_descendant?({s1, _}, {s2, _}, def_) do
+    MapSet.member?(Definition.descendants(def_, s2), s1)
   end
 
   defp match_event?(%Transition{event: nil}, _event), do: false
@@ -192,29 +257,28 @@ defmodule ExMachine.Engine do
 
   # ── Microstep ─────────────────────────────────────────────────────────────
 
-  # Action-only transition (no target).
-  defp microstep(machine, _source, %Transition{target: nil} = transition, event) do
-    step = Step.new(machine.context, event)
-    step = apply_action(step, transition.action)
-
-    micro = %Microstep{event: event, transition: transition, exited: [], entered: []}
-
-    %{
-      machine
-      | context: step.context,
-        queue: machine.queue ++ step.raised,
-        trace: Trace.push(machine.trace, micro)
-    }
-  end
-
-  defp microstep(machine, source, %Transition{} = transition, event) do
+  # Apply a non-empty set of non-conflicting transitions atomically. Each
+  # element is a `{source_id, %Transition{}}` pair as returned by
+  # `select_transitions/2` or `select_eventless/1`.
+  defp microstep(%Machine{} = machine, [_ | _] = transitions, event) do
     %Machine{definition: def_, configuration: config, context: ctx, histories: histories} =
       machine
 
-    target = resolve_choice(def_, transition.target, ctx)
+    chains =
+      Enum.map(transitions, fn {source, %Transition{} = t} ->
+        target = resolve_choice(def_, t.target, ctx)
 
-    {exit_chain, entry_chain} =
-      compute_microstep_sets(def_, config, histories, source, transition, target)
+        case target do
+          nil ->
+            {[], []}
+
+          _ ->
+            compute_microstep_sets(def_, config, histories, source, t, target)
+        end
+      end)
+
+    exit_chain = combined_exit_chain(def_, chains)
+    entry_chain = combined_entry_chain(chains)
 
     new_histories = record_histories(def_, exit_chain, config, histories)
 
@@ -222,7 +286,11 @@ defmodule ExMachine.Engine do
       ctx
       |> Step.new(event)
       |> apply_actions(exit_actions(def_, exit_chain))
-      |> apply_action(transition.action)
+      |> then(fn s ->
+        Enum.reduce(transitions, s, fn {_src, %Transition{action: a}}, acc ->
+          apply_action(acc, a)
+        end)
+      end)
       |> apply_actions(entry_actions(def_, entry_chain))
 
     new_config =
@@ -230,11 +298,11 @@ defmodule ExMachine.Engine do
       |> Configuration.exit(exit_chain)
       |> add_chain(entry_chain)
 
-    step = maybe_emit_done(def_, entry_chain, step)
+    step = emit_done_events(def_, entry_chain, new_config, step)
 
     micro = %Microstep{
       event: event,
-      transition: transition,
+      transitions: Enum.map(transitions, fn {_s, t} -> t end),
       exited: exit_chain,
       entered: entry_chain
     }
@@ -246,8 +314,28 @@ defmodule ExMachine.Engine do
         histories: new_histories,
         queue: machine.queue ++ step.raised,
         trace: Trace.push(machine.trace, micro),
-        running?: not stopped_after_entering?(def_, entry_chain)
+        running?: not stopped?(def_, new_config)
     }
+  end
+
+  # Union of per-transition exit chains, deepest-first. We sort the union so
+  # that even if independent transitions contribute disjoint chains, the
+  # final order remains a globally-correct deepest-first traversal.
+  defp combined_exit_chain(def_, chains) do
+    chains
+    |> Enum.flat_map(fn {ec, _} -> ec end)
+    |> Enum.uniq()
+    |> Enum.sort_by(&node_depth(def_, &1), :desc)
+  end
+
+  # Union of per-transition entry chains. Each per-transition chain is
+  # already parent-first within its own sub-tree; for non-conflicting
+  # transitions across regions the sub-trees are disjoint, so concatenating
+  # them in selection order preserves the parent-first invariant globally.
+  defp combined_entry_chain(chains) do
+    chains
+    |> Enum.flat_map(fn {_, enc} -> enc end)
+    |> Enum.uniq()
   end
 
   # Compute the (exit_chain, entry_chain) for a microstep, branching on
@@ -488,30 +576,73 @@ defmodule ExMachine.Engine do
 
   # ── Final detection & done events ────────────────────────────────────────
 
-  defp maybe_emit_done(def_, entry_chain, %Step{} = step) do
-    case List.last(entry_chain) do
-      nil ->
+  # Emit `done.state.<id>` for every composite that just completed in this
+  # microstep. A compound or region completes when one of its substates is
+  # an entered :final. A parallel completes when ALL its regions have
+  # completed (recursively bubbled). The check sweeps every entered final
+  # leaf and walks up its ancestor chain, raising at each newly-completed
+  # ancestor and stopping when an ancestor is not yet complete.
+  defp emit_done_events(def_, entry_chain, new_config, %Step{} = step) do
+    finals_entered =
+      Enum.filter(entry_chain, fn id -> Definition.fetch!(def_, id).kind == :final end)
+
+    Enum.reduce(finals_entered, step, fn final_id, acc ->
+      bubble_done(def_, Definition.fetch!(def_, final_id).parent, new_config, acc)
+    end)
+  end
+
+  defp bubble_done(_def, nil, _config, step), do: step
+
+  defp bubble_done(def_, completed_id, config, step) do
+    step = Step.raise_event(step, done_event(completed_id))
+    parent_id = Definition.fetch!(def_, completed_id).parent
+
+    cond do
+      parent_id == nil ->
         step
 
-      leaf ->
-        node = Definition.fetch!(def_, leaf)
+      parallel_done?(def_, parent_id, config) ->
+        bubble_done(def_, parent_id, config, step)
 
-        if node.kind == :final and node.parent != nil do
-          Step.raise_event(step, done_event(node.parent))
-        else
-          step
-        end
+      true ->
+        step
     end
   end
 
-  defp stopped_after_entering?(def_, entry_chain) do
-    case List.last(entry_chain) do
-      nil ->
-        false
+  # `parent_id` is "done" when it is a :parallel whose every region contains
+  # an active :final. Returns false for non-parallel parents.
+  defp parallel_done?(def_, parent_id, config) do
+    parent = Definition.fetch!(def_, parent_id)
 
-      leaf ->
-        node = Definition.fetch!(def_, leaf)
-        node.kind == :final and node.parent == def_.root
+    parent.kind == :parallel and
+      Enum.all?(parent.substates, fn region_id -> region_done?(def_, region_id, config) end)
+  end
+
+  # A region is done when it currently contains an active :final descendant.
+  defp region_done?(def_, region_id, config) do
+    Definition.descendants(def_, region_id)
+    |> Enum.any?(fn d ->
+      MapSet.member?(config, d) and Definition.fetch!(def_, d).kind == :final
+    end)
+  end
+
+  # The machine stops when the root has reached a terminal configuration:
+  # for a compound root, an active :final direct child; for a parallel root,
+  # every region must be done.
+  defp stopped?(def_, config) do
+    root = Definition.fetch!(def_, def_.root)
+
+    case root.kind do
+      :compound ->
+        Enum.any?(root.substates, fn s ->
+          MapSet.member?(config, s) and Definition.fetch!(def_, s).kind == :final
+        end)
+
+      :parallel ->
+        parallel_done?(def_, def_.root, config)
+
+      _ ->
+        false
     end
   end
 

@@ -28,8 +28,10 @@ defmodule ExMachine.Trace do
 
     * `:event` — event that fired this transition (`nil` for eventless
       and initialisation).
-    * `:transition` — the `Transition` taken, or `nil` for the initial
-      microstep when no transition is involved.
+    * `:transitions` — list of `Transition` structs taken atomically in
+      this microstep. Empty for the initial microstep. Usually one
+      element; multiple elements occur only when several non-conflicting
+      transitions across parallel regions fire on the same event.
     * `:exited` — ordered list of state ids exited (child-first).
     * `:entered` — ordered list of state ids entered (parent-first).
   """
@@ -42,13 +44,13 @@ defmodule ExMachine.Trace do
 
     @type t :: %__MODULE__{
             event: term() | nil,
-            transition: Transition.t() | nil,
+            transitions: [Transition.t()],
             exited: [StateNode.id()],
             entered: [StateNode.id()]
           }
 
     defstruct event: nil,
-              transition: nil,
+              transitions: [],
               exited: [],
               entered: []
   end
@@ -79,8 +81,7 @@ defmodule ExMachine.Trace do
       | microsteps: trace.microsteps ++ [ms],
         entered: trace.entered ++ ms.entered,
         exited: trace.exited ++ ms.exited,
-        transitions:
-          if(ms.transition, do: trace.transitions ++ [ms.transition], else: trace.transitions)
+        transitions: trace.transitions ++ ms.transitions
     }
   end
 end

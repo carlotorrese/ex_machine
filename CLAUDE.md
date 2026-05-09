@@ -77,9 +77,12 @@ test/ex_machine/
 - **`mix.exs` version is single-source via the `@version` module attribute.**
   Don't duplicate the literal in `docs[:source_ref]` or anywhere else.
 
-- **Engine raises** when asked to enter a `:parallel` substate or to
-  cross regions. Parallel arrives in M5. History, choice, and internal
-  transitions are live since M4.
+- **Engine is feature-complete for the SCXML pure-execution subset.**
+  Atomic, compound, parallel, region, final, history (shallow + deep),
+  choice, internal/external transitions, eventless transitions,
+  run-to-completion, and `done.state.<id>` bubble-up are all live.
+  Server-mode (delayed events, invoked services, subscribe) and
+  visualization arrive in M6-M8.
 
 ## Milestone commit convention
 
