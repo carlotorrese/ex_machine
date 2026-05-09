@@ -81,8 +81,16 @@ test/ex_machine/
   Atomic, compound, parallel, region, final, history (shallow + deep),
   choice, internal/external transitions, eventless transitions,
   run-to-completion, and `done.state.<id>` bubble-up are all live.
-  Server-mode (delayed events, invoked services, subscribe) and
-  visualization arrive in M6-M8.
+- **Server-mode is live (M6).** `use ExMachine.Server, statechart: Mod`
+  generates `start_link/send_event/call_event/get_*/subscribe/stop`. The
+  GenServer wraps each dispatch in a `[:ex_machine, :macrostep]`
+  telemetry span and broadcasts `{:ex_machine, :transition, %Snapshot{}}`
+  to subscribers. After a terminal config the server stays alive but
+  refuses events. Delayed events and invoked services arrive in M7.
+- **`mix.exs` declares `mod: {ExMachine.Application, []}`.** The app
+  supervisor brings up `Registry` named `ExMachine.PubSub` (keys:
+  `:duplicate`). Library users do not need to add anything to their own
+  supervision tree.
 
 ## Milestone commit convention
 
