@@ -133,6 +133,55 @@ defmodule ExMachine.ServerTest do
     end
   end
 
+  describe "regression: bug_005 — subscriptions survive a restart of a named server" do
+    test "subscribing by name keeps receiving notifications after the named server is restarted" do
+      name = :"light_#{System.unique_integer([:positive])}"
+
+      {:ok, pid1} = LightServer.start_link(name: name)
+      :ok = LightServer.subscribe(name)
+
+      {:ok, _} = LightServer.call_event(name, :timer)
+      assert_receive {:ex_machine, :transition, %Snapshot{atomic_states: [:green]}}, 100
+
+      # Take down the named server. The supervisor would normally restart
+      # it under the same name; here we simulate the restart manually.
+      LightServer.stop(pid1)
+
+      # Ensure the new process actually gets a different PID by waiting
+      # for the registered name to be free.
+      wait_until(fn -> Process.whereis(name) == nil end, 100)
+
+      {:ok, pid2} = LightServer.start_link(name: name)
+      assert pid2 != pid1
+
+      # Without the fix, the subscription was keyed on pid1 and would
+      # be silently orphaned. With the fix, it is keyed on `name` and
+      # the new process's notifications still arrive.
+      {:ok, _} = LightServer.call_event(name, :timer)
+      assert_receive {:ex_machine, :transition, %Snapshot{atomic_states: [:green]}}, 100
+
+      LightServer.stop(pid2)
+    end
+
+    defp wait_until(fun, timeout) do
+      deadline = System.monotonic_time(:millisecond) + timeout
+
+      Stream.repeatedly(fn -> nil end)
+      |> Enum.reduce_while(:ok, fn _, _ ->
+        if fun.() do
+          {:halt, :ok}
+        else
+          if System.monotonic_time(:millisecond) >= deadline do
+            {:halt, :timeout}
+          else
+            Process.sleep(5)
+            {:cont, :ok}
+          end
+        end
+      end)
+    end
+  end
+
   describe "telemetry" do
     setup do
       ref = make_ref()

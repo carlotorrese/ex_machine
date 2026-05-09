@@ -55,6 +55,13 @@ TrafficLight.Server.unsubscribe(:tl)
 A subscriber that registers twice still receives one message per
 event — duplicates are dropped at the dispatch site.
 
+When `server` is a registered name (or a `{:via, _, _}` /
+`{name, node}` reference), the subscription is keyed by that name,
+not by the server's PID. This means subscriptions **survive a
+supervised restart** — a `restart: :transient` child that comes
+back under the same name keeps delivering notifications without
+re-subscribing.
+
 ## Terminal configurations
 
 When the machine reaches a terminal configuration (top-level final or

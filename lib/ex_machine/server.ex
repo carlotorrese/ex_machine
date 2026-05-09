@@ -80,9 +80,17 @@ defmodule ExMachine.Server do
   defmodule State do
     @moduledoc false
     # Runtime state of an ExMachine.Server process.
+    #
+    # `pubsub_key` is the key used to register subscribers in
+    # `ExMachine.PubSub`. For a NAMED server it is the atom (or {via, _, _}
+    # / {name, node}) used as `:name` in `start_link/2`, so subscriptions
+    # survive a supervised restart that hands the new process a fresh PID.
+    # For an ANONYMOUS server it falls back to the GenServer's `self()`
+    # PID — restart-survival is not possible without a stable name anyway.
     defstruct [
       :machine,
       :task_supervisor,
+      :pubsub_key,
       timers: %{},
       invocations: %{}
     ]
@@ -187,6 +195,13 @@ defmodule ExMachine.Server do
   @doc """
   Register the calling process for transition + stopped notifications.
 
+  When `server` is a registered name (or a `{:via, _, _}` /
+  `{name, node}` reference), the subscription is keyed by that name,
+  not by the server's PID. This lets the subscription **survive a
+  supervised restart**: when the supervisor brings up a new process
+  under the same name, its notifications still reach the existing
+  subscribers without re-subscribing.
+
   Each call adds a fresh registration; the dispatch path filters
   duplicates so a subscriber that registers twice still receives one
   message per event. Use `unsubscribe/1` to drop all of the calling
@@ -194,32 +209,35 @@ defmodule ExMachine.Server do
   """
   @spec subscribe(GenServer.server()) :: :ok
   def subscribe(server) do
-    pid = resolve_pid!(server)
-    {:ok, _} = Registry.register(@pubsub, pid, nil)
+    {:ok, _} = Registry.register(@pubsub, pubsub_key_for(server), nil)
     :ok
   end
 
   @doc "Stop receiving notifications for `server`."
   @spec unsubscribe(GenServer.server()) :: :ok
   def unsubscribe(server) do
-    pid = resolve_pid!(server)
-    Registry.unregister(@pubsub, pid)
+    Registry.unregister(@pubsub, pubsub_key_for(server))
     :ok
+  end
+
+  # Choose the Registry key for a `GenServer.server()` reference.
+  # Atoms / via / {name, node} are stable across restarts; PIDs are not,
+  # but a PID is the only key we have for an anonymous server.
+  defp pubsub_key_for(name) when is_atom(name), do: name
+  defp pubsub_key_for({:via, _, _} = via), do: via
+  defp pubsub_key_for({name, node}) when is_atom(name) and is_atom(node), do: {name, node}
+
+  defp pubsub_key_for(pid) when is_pid(pid) do
+    case Process.info(pid, :registered_name) do
+      {:registered_name, name} when is_atom(name) and name != [] -> name
+      _ -> pid
+    end
   end
 
   @doc "Stop the server. See `GenServer.stop/3`."
   @spec stop(GenServer.server(), term(), timeout()) :: :ok
   def stop(server, reason \\ :normal, timeout \\ :infinity) do
     GenServer.stop(server, reason, timeout)
-  end
-
-  defp resolve_pid!(pid) when is_pid(pid), do: pid
-
-  defp resolve_pid!(server) do
-    case GenServer.whereis(server) do
-      pid when is_pid(pid) -> pid
-      nil -> raise ArgumentError, "no process registered for #{inspect(server)}"
-    end
   end
 
   # ── GenServer callbacks ──────────────────────────────────────────────────
@@ -230,12 +248,18 @@ defmodule ExMachine.Server do
     context = Keyword.get(args, :context)
     {:ok, supervisor} = Task.Supervisor.start_link()
     machine = ExMachine.init(statechart, context)
+    pubsub_key = pubsub_key_for(self())
 
-    state = %State{machine: machine, task_supervisor: supervisor}
+    state = %State{
+      machine: machine,
+      task_supervisor: supervisor,
+      pubsub_key: pubsub_key
+    }
+
     state = process_side_effects(state, machine)
 
-    publish_transition(self(), Snapshot.from_machine(machine))
-    maybe_publish_stopped(self(), machine)
+    publish_transition(pubsub_key, Snapshot.from_machine(machine))
+    maybe_publish_stopped(pubsub_key, machine)
     {:ok, state}
   end
 
@@ -334,8 +358,7 @@ defmodule ExMachine.Server do
   # ── Internal dispatch + side effects ─────────────────────────────────────
 
   defp internal_dispatch(%State{} = state, event) do
-    server = self()
-    metadata = %{server: server, event: event}
+    metadata = %{server: self(), event: event}
 
     new_machine =
       Telemetry.macrostep(metadata, fn ->
@@ -345,8 +368,8 @@ defmodule ExMachine.Server do
     state = %{state | machine: new_machine}
     state = process_side_effects(state, new_machine)
 
-    publish_transition(server, Snapshot.from_machine(new_machine))
-    maybe_publish_stopped(server, new_machine)
+    publish_transition(state.pubsub_key, Snapshot.from_machine(new_machine))
+    maybe_publish_stopped(state.pubsub_key, new_machine)
     state
   end
 
@@ -464,12 +487,15 @@ defmodule ExMachine.Server do
     broadcast(server, {:ex_machine, :transition, snapshot})
   end
 
-  defp maybe_publish_stopped(_server, %Machine{running?: true}), do: :ok
+  defp maybe_publish_stopped(_pubsub_key, %Machine{running?: true}), do: :ok
 
-  defp maybe_publish_stopped(server, %Machine{} = machine) do
+  defp maybe_publish_stopped(pubsub_key, %Machine{} = machine) do
     snapshot = Snapshot.from_machine(machine)
-    Telemetry.stopped(server, :normal, snapshot)
-    broadcast(server, {:ex_machine, :stopped, :normal})
+    # Telemetry metadata gets the raw PID so observers can correlate
+    # with macrostep spans; the broadcast uses the (possibly stable)
+    # pubsub_key so subscriptions survive a supervised restart.
+    Telemetry.stopped(self(), :normal, snapshot)
+    broadcast(pubsub_key, {:ex_machine, :stopped, :normal})
   end
 
   defp broadcast(server, message) do
