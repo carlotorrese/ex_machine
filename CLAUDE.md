@@ -97,6 +97,14 @@ test/ex_machine/
   uses `stateDiagram-v2` with `<<history>>` / `<<choice>>` markers and
   `[*]` for final endpoints; SCXML emits W3C-conforming XML. Choice
   has no SCXML equivalent and is emitted as a comment.
+- **Property + conformance tests (M9).** `test/property/` runs
+  StreamData properties over the engine's invariants (ancestry-closure,
+  atomic_states purity, unknown-event no-op, microstep exit/entry
+  consistency). Generators live in `test/support/statechart_generators.ex`
+  and build `%Definition{}` directly (NOT via the DSL — its compile-time
+  validation would crash the test load instead of failing properties).
+  `test/scxml/` re-codifies eight paragraphs of the W3C SCXML algorithm
+  as small fixtures + assertions; no XML parsing.
 - **`mix.exs` declares `mod: {ExMachine.Application, []}`.** The app
   supervisor brings up `Registry` named `ExMachine.PubSub` (keys:
   `:duplicate`). Library users do not need to add anything to their own
