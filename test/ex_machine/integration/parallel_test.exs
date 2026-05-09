@@ -63,6 +63,52 @@ defmodule ExMachine.Integration.ParallelTest.TopParallel do
   end
 end
 
+defmodule ExMachine.Integration.ParallelTest.SharedFinish do
+  @moduledoc false
+  # Regression for bug_001: when both regions reach their final in the
+  # SAME microstep (shared event), done.state.<parallel> must be raised
+  # exactly once, not once per region final.
+
+  use ExMachine.Statechart, type: :parallel
+
+  region :a do
+    initial(:a1)
+    state(:a1, do: on(:end, target: :a_done))
+    final(:a_done)
+  end
+
+  region :b do
+    initial(:b1)
+    state(:b1, do: on(:end, target: :b_done))
+    final(:b_done)
+  end
+end
+
+defmodule ExMachine.Integration.ParallelTest.HalfEnter do
+  @moduledoc false
+  # Regression for bug_004: a transition into one region of a non-root
+  # parallel must populate every sibling region (SCXML
+  # addAncestorStatesToEnter), not leave the parallel half-entered.
+
+  use ExMachine.Statechart
+
+  initial(:outside)
+
+  state(:outside, do: on(:enter, target: :l1))
+
+  parallel :work do
+    region :left do
+      initial(:l1)
+      state(:l1)
+    end
+
+    region :right do
+      initial(:r1)
+      state(:r1)
+    end
+  end
+end
+
 defmodule ExMachine.Integration.ParallelTest.Conflict do
   @moduledoc false
   # Both regions react to :abort. Each transition's exit set includes
@@ -96,7 +142,13 @@ end
 defmodule ExMachine.Integration.ParallelTest do
   use ExUnit.Case, async: true
 
-  alias ExMachine.Integration.ParallelTest.{Conflict, TopParallel, Workflow}
+  alias ExMachine.Integration.ParallelTest.{
+    Conflict,
+    HalfEnter,
+    SharedFinish,
+    TopParallel,
+    Workflow
+  }
 
   describe "done events under parallel" do
     test "done.state.<region> is raised when a region reaches final" do
@@ -168,6 +220,35 @@ defmodule ExMachine.Integration.ParallelTest do
       assert :a1 in machine.trace.exited
       assert :b1 in machine.trace.exited
       assert :work in machine.trace.exited
+    end
+  end
+
+  describe "regression: bug_001 — done bubble dedup" do
+    test "done.state.<parallel> raised exactly once when regions finalize together" do
+      machine = SharedFinish |> ExMachine.init() |> ExMachine.dispatch(:end)
+
+      # Top-level parallel completed, machine stopped, the bubbled
+      # done.state.<root> sits in machine.queue (run_to_completion is a
+      # no-op once running? becomes false).
+      refute machine.running?
+
+      done_count = Enum.count(machine.queue, &(&1 == :"done.state.shared_finish"))
+      assert done_count == 1, "expected one done.state.<root>, got #{done_count}"
+    end
+  end
+
+  describe "regression: bug_004 — parallel half-entry" do
+    test "transition into one region of a non-root parallel populates every sibling region" do
+      machine = HalfEnter |> ExMachine.init() |> ExMachine.dispatch(:enter)
+
+      assert MapSet.member?(machine.configuration, :work)
+      assert MapSet.member?(machine.configuration, :left)
+      assert MapSet.member?(machine.configuration, :right)
+      assert MapSet.member?(machine.configuration, :l1)
+      assert MapSet.member?(machine.configuration, :r1)
+
+      # And atomic_states reflects both regions, not just the on-path one.
+      assert ExMachine.atomic_states(machine) == [:l1, :r1]
     end
   end
 

@@ -373,14 +373,16 @@ defmodule ExMachine.Engine do
     lcca = lcca_external(def_, source, parent_id)
     exit_chain = compute_exit_chain(def_, config, lcca)
 
-    parent_chain =
+    ancestors_to_parent =
       parent_id
       |> ancestors_until(def_, lcca)
       |> Enum.reverse()
-      |> Kernel.++([parent_id])
 
+    parent_chain = ancestors_to_parent ++ [parent_id]
     restore_chain = history_restore_chain(def_, hist_node, histories)
-    {exit_chain, parent_chain ++ restore_chain}
+    base_entry = parent_chain ++ restore_chain
+    siblings = parallel_sibling_chains(def_, ancestors_to_parent, base_entry)
+    {exit_chain, base_entry ++ siblings}
   end
 
   # ── LCCA & set computation ────────────────────────────────────────────────
@@ -432,12 +434,37 @@ defmodule ExMachine.Engine do
 
   # Ancestors of `target` strictly between LCCA (excluded) and `target`
   # (excluded), parent-first, then the initial chain from `target` (which
-  # already starts with `target` itself).
+  # already starts with `target` itself). For every `:parallel` ancestor
+  # on the path, the initial chains of its other regions are appended so
+  # the parallel is fully entered, not half-entered (SCXML's
+  # `addAncestorStatesToEnter`).
   defp compute_entry_chain(def_, lcca, target) do
-    target
-    |> ancestors_until(def_, lcca)
-    |> Enum.reverse()
-    |> Kernel.++(Configuration.initial_chain(def_, target))
+    ancestors_path = target |> ancestors_until(def_, lcca) |> Enum.reverse()
+    target_chain = Configuration.initial_chain(def_, target)
+    base_entry = ancestors_path ++ target_chain
+    siblings = parallel_sibling_chains(def_, ancestors_path, base_entry)
+    base_entry ++ siblings
+  end
+
+  # For each `:parallel` ancestor on `ancestors_path`, append the
+  # `Configuration.initial_chain` of every region that is NOT already on
+  # the entry path. Without this, a transition into one region of a
+  # parallel would leave its sibling regions inactive — violating the
+  # invariant that an active parallel has every region populated.
+  defp parallel_sibling_chains(def_, ancestors_path, base_entry) do
+    on_path = MapSet.new(base_entry)
+
+    Enum.flat_map(ancestors_path, fn anc ->
+      anc_node = Definition.fetch!(def_, anc)
+
+      if anc_node.kind == :parallel do
+        anc_node.substates
+        |> Enum.reject(&MapSet.member?(on_path, &1))
+        |> Enum.flat_map(&Configuration.initial_chain(def_, &1))
+      else
+        []
+      end
+    end)
   end
 
   defp ancestors_until(id, def_, boundary) do
@@ -594,30 +621,44 @@ defmodule ExMachine.Engine do
   # completed (recursively bubbled). The check sweeps every entered final
   # leaf and walks up its ancestor chain, raising at each newly-completed
   # ancestor and stopping when an ancestor is not yet complete.
+  #
+  # An ancestor is bubbled at most ONCE per microstep: when several regions
+  # of the same parallel reach final in the same microstep, every iteration
+  # of `finals_entered` sees `parallel_done?/3` return `true` against the
+  # final config, but the `seen` MapSet keeps us from raising the parent's
+  # done event multiple times.
   defp emit_done_events(def_, entry_chain, new_config, %Step{} = step) do
     finals_entered =
       Enum.filter(entry_chain, fn id -> Definition.fetch!(def_, id).kind == :final end)
 
-    Enum.reduce(finals_entered, step, fn final_id, acc ->
-      bubble_done(def_, Definition.fetch!(def_, final_id).parent, new_config, acc)
-    end)
+    {_seen, step} =
+      Enum.reduce(finals_entered, {MapSet.new(), step}, fn final_id, {seen, acc} ->
+        bubble_done(def_, Definition.fetch!(def_, final_id).parent, new_config, acc, seen)
+      end)
+
+    step
   end
 
-  defp bubble_done(_def, nil, _config, step), do: step
+  defp bubble_done(_def, nil, _config, step, seen), do: {seen, step}
 
-  defp bubble_done(def_, completed_id, config, step) do
-    step = Step.raise_event(step, done_event(completed_id))
-    parent_id = Definition.fetch!(def_, completed_id).parent
+  defp bubble_done(def_, completed_id, config, step, seen) do
+    if MapSet.member?(seen, completed_id) do
+      {seen, step}
+    else
+      step = Step.raise_event(step, done_event(completed_id))
+      seen = MapSet.put(seen, completed_id)
+      parent_id = Definition.fetch!(def_, completed_id).parent
 
-    cond do
-      parent_id == nil ->
-        step
+      cond do
+        parent_id == nil ->
+          {seen, step}
 
-      parallel_done?(def_, parent_id, config) ->
-        bubble_done(def_, parent_id, config, step)
+        parallel_done?(def_, parent_id, config) ->
+          bubble_done(def_, parent_id, config, step, seen)
 
-      true ->
-        step
+        true ->
+          {seen, step}
+      end
     end
   end
 
