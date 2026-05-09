@@ -20,12 +20,13 @@ defmodule ExMachine.Step do
       `{name, params}`, or `nil` for entry/eventless steps).
     * `:raised` — list of internal events queued from this microstep, processed
       synchronously before the next external event (run-to-completion).
-    * `:delayed` — list of `{ref, event, ms, owner_state}` for `send_after/3`.
-      Honored only in server-mode (`ExMachine.Server`); ignored in pure
-      functional dispatch.
-    * `:invokes` — list of `{ref, spec, owner_state}` for `invoke/3`. Same
-      remark as `:delayed`.
-    * `:cancels` — list of refs to cancel previously scheduled timers/invokes.
+    * `:delayed` — list of `{ref, event, ms, owner_state}` produced by
+      `send_after/4`. Honored by `ExMachine.Server` (it schedules a
+      `Process.send_after`); pure callers can inspect `machine.pending_delayed`.
+    * `:invokes` — list of `{id, spec, owner_state}` produced by `invoke/4`.
+      Honored by `ExMachine.Server` (spawns under a `Task.Supervisor`).
+    * `:cancels` — list of timer refs (from `send_after/4`) and/or invoke
+      ids (from `invoke/4`) to cancel; consumed by the server.
 
   ## Helpers
 
@@ -38,14 +39,8 @@ defmodule ExMachine.Step do
       end
 
   Action functions never mutate the engine state directly — they return a new
-  `%Step{}`. This module is intentionally lean: heavier concerns (timers,
-  invocations) are implemented by `ExMachine.Server` in milestone M6/M7.
-
-  > #### Status {: .info}
-  >
-  > Helpers for `send_after/3` and `invoke/3` are **stubs** in M2; the storage
-  > shape is final but the engine does not yet honor them. Full semantics arrive
-  > in milestones M3 (raised events) and M7 (delayed + invoked).
+  `%Step{}`. This module is intentionally lean: the actual scheduling of
+  timers and tasks lives in `ExMachine.Server`.
   """
 
   alias __MODULE__

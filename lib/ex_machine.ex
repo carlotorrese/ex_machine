@@ -5,8 +5,8 @@ defmodule ExMachine do
   ExMachine implements the Statechart formalism (Harel 1987 / SCXML W3C) on top
   of pure-functional Elixir. A statechart is declared at compile-time via the
   `ExMachine.Statechart` DSL; the resulting `ExMachine.Definition` can be
-  executed either functionally — via `ExMachine.Engine` — or as a supervised
-  GenServer process — via `ExMachine.Server` (M6).
+  executed either functionally — via `ExMachine.Engine` — or as a long-lived
+  GenServer process — via `ExMachine.Server`.
 
   ## Modules
 
@@ -20,13 +20,20 @@ defmodule ExMachine do
     * `ExMachine.Machine` — running statechart instance.
     * `ExMachine.Engine` — pure-functional execution engine.
     * `ExMachine.Trace` — audit trail of macro/microsteps.
+    * `ExMachine.Server` — GenServer wrapper with delayed events,
+      invoked services, pub/sub subscribers and `:telemetry`.
+    * `ExMachine.Visualize` — render to Mermaid `stateDiagram-v2` and
+      W3C SCXML XML.
 
   > #### Status {: .info}
   >
-  > Version `0.2.0-alpha.1` is a ground-up rewrite. M3 ships atomic, compound,
-  > and final state execution with eventless transitions, raised events and
-  > `done.state.<id>`. History, choice, parallel regions and server-mode
-  > arrive in M4-M7.
+  > Version `0.2.0-alpha.1`. Engine is feature-complete for the SCXML
+  > pure-execution subset (atomic, compound, parallel, region, final,
+  > history, choice, internal/external transitions, eventless,
+  > run-to-completion, `done.state.<id>` propagation). Server-mode adds
+  > delayed events (`Step.send_after/4`), invoked services
+  > (`Step.invoke/4`) and a pub/sub Registry. The public API may still
+  > tighten before `0.2.0` proper.
 
   ## Hello, traffic light
 

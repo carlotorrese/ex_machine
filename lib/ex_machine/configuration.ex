@@ -13,12 +13,14 @@ defmodule ExMachine.Configuration do
 
   ## Operations
 
-    * `initial/2` — starting configuration for a definition.
+    * `initial/1` — starting configuration for a definition.
+    * `initial_chain/2` — walk the `:initial` chain (handles compound,
+      region, and parallel) down to atomic descendants.
     * `enter/3` — add a node and its initial chain.
     * `exit/2` — remove a set of nodes.
     * `active?/2` — membership test.
     * `atomic_states/2` — atomic states currently active (the "leaves").
-    * `proper_ancestors_in/4` — ancestors up to (excluding) some boundary.
+    * `proper_ancestors_until/3` — ancestors up to (excluding) some boundary.
 
   Pseudostates (`:choice`, `:history`) are never present in a configuration.
   They are resolved during the entry-set computation in `ExMachine.Engine`.
@@ -34,9 +36,8 @@ defmodule ExMachine.Configuration do
 
   @doc """
   Initial configuration produced by entering the root and following its
-  `:initial` chain down to the first atomic descendant.
-
-  Does not yet support parallel roots — that arrives in milestone M5.
+  `:initial` chain down to atomic descendants. Parallel roots are
+  expanded to include every region's initial chain.
   """
   @spec initial(Definition.t()) :: {t(), [StateNode.id()]}
   def initial(%Definition{root: root} = def_) do
