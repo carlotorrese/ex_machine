@@ -160,7 +160,8 @@ defmodule ExMachine.Server do
   @spec start_link(module(), keyword()) :: GenServer.on_start()
   def start_link(statechart, args) when is_atom(statechart) and is_list(args) do
     {gen_opts, init_args} = Keyword.split(args, [:name])
-    GenServer.start_link(__MODULE__, {statechart, init_args}, gen_opts)
+    name = Keyword.get(gen_opts, :name)
+    GenServer.start_link(__MODULE__, {statechart, init_args, name}, gen_opts)
   end
 
   @doc "Cast an event to the server. Returns `:ok` immediately."
@@ -243,12 +244,20 @@ defmodule ExMachine.Server do
   # ── GenServer callbacks ──────────────────────────────────────────────────
 
   @impl true
-  def init({statechart, args}) do
+  def init({statechart, args, name}) do
     Process.flag(:trap_exit, true)
     context = Keyword.get(args, :context)
     {:ok, supervisor} = Task.Supervisor.start_link()
     machine = ExMachine.init(statechart, context)
-    pubsub_key = pubsub_key_for(self())
+
+    # Compute the pubsub key from the EXPLICIT `:name` passed to
+    # start_link/2 when present. `Process.info(self(), :registered_name)`
+    # only sees plain-atom registrations via `:erlang.register/2`, so it
+    # would report `[]` for `{:via, _, _}` and `{:global, _}`
+    # registrations and we'd silently fall back to the bare PID, while
+    # subscribers would key off the via/global tuple — a permanent
+    # mismatch.
+    pubsub_key = if name, do: pubsub_key_for(name), else: pubsub_key_for(self())
 
     state = %State{
       machine: machine,
@@ -377,23 +386,29 @@ defmodule ExMachine.Server do
   # cancellations) accumulated during the most recent init/dispatch, plus
   # auto-cancel any timer/task whose owner state was exited.
   #
-  # Pending entries are FILTERED before scheduling: if an action requested
-  # a timer/invocation while inside a state that was then exited later in
-  # the same macrostep (e.g. via an eventless chain or a raised event),
-  # we must not schedule the orphan in the first place. Same for entries
-  # whose ref/id appears in `machine.pending_cancels`.
+  # Pending entries are FILTERED before scheduling: an entry is dropped
+  # if its owner state is no longer active in `machine.configuration`
+  # OR if its ref/id appears in `machine.pending_cancels`. Filtering
+  # against the post-macrostep configuration (rather than against
+  # `trace.exited`) is essential because `trace.exited` accumulates
+  # every state exited during the macrostep — including states that
+  # were then RE-ENTERED in the same macrostep (external self-transitions,
+  # transitions to an ancestor, or transitions into a parallel that
+  # re-populates all regions). Filtering against `trace.exited` would
+  # drop the new entry-action's request even though the owner is
+  # active again.
   defp process_side_effects(%State{} = state, %Machine{} = machine) do
-    exited_set = MapSet.new(machine.trace.exited)
+    config = machine.configuration
     cancels_set = MapSet.new(machine.pending_cancels)
 
     delayed_to_schedule =
       Enum.reject(machine.pending_delayed, fn {ref, _ev, _ms, owner} ->
-        MapSet.member?(exited_set, owner) or MapSet.member?(cancels_set, ref)
+        not MapSet.member?(config, owner) or MapSet.member?(cancels_set, ref)
       end)
 
     invokes_to_spawn =
       Enum.reject(machine.pending_invokes, fn {id, _spec, owner} ->
-        MapSet.member?(exited_set, owner) or MapSet.member?(cancels_set, id)
+        not MapSet.member?(config, owner) or MapSet.member?(cancels_set, id)
       end)
 
     state

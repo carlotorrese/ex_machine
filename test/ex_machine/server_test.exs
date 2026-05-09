@@ -182,6 +182,33 @@ defmodule ExMachine.ServerTest do
     end
   end
 
+  describe "regression: bug_002 (3rd pass) — via/global pubsub key" do
+    test "subscribers to a {:via, _, _}-registered server actually receive notifications" do
+      registry = :"reg_#{System.unique_integer([:positive])}"
+      {:ok, _} = Registry.start_link(keys: :unique, name: registry)
+      via = {:via, Registry, {registry, :tl}}
+
+      {:ok, pid} = LightServer.start_link(name: via)
+
+      on_exit(fn ->
+        try do
+          if Process.alive?(pid), do: GenServer.stop(pid, :normal, 100)
+        catch
+          :exit, _ -> :ok
+        end
+      end)
+
+      :ok = LightServer.subscribe(via)
+      {:ok, %Snapshot{atomic_states: [:green]}} = LightServer.call_event(via, :timer)
+
+      # Without the fix, init/1 would cache the bare PID as pubsub_key
+      # (Process.info doesn't see {:via, _, _} registrations) while
+      # subscribe/1 keys off the via tuple — the two never match and
+      # the message is silently dropped.
+      assert_receive {:ex_machine, :transition, %Snapshot{atomic_states: [:green]}}, 100
+    end
+  end
+
   describe "telemetry" do
     setup do
       ref = make_ref()

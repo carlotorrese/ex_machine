@@ -66,6 +66,37 @@ defmodule ExMachine.Integration.DelayedEventsTest.RaceServer do
   use ExMachine.Server, statechart: ExMachine.Integration.DelayedEventsTest.SameMacrostepRace
 end
 
+defmodule ExMachine.Integration.DelayedEventsTest.SelfReset do
+  @moduledoc false
+  # Regression for the third-pass bug_003: an external self-transition
+  # exits and re-enters its source in the same macrostep, so the source
+  # appears in `trace.exited` AND in `machine.configuration`. The new
+  # entry's `Step.send_after` timer must still be armed.
+
+  use ExMachine.Statechart
+  alias ExMachine.Step
+
+  initial(:ringing)
+
+  state :ringing do
+    on_entry(&__MODULE__.schedule_silence/1)
+    on(:reset, target: :ringing)
+    on(:silence, target: :silenced)
+  end
+
+  state(:silenced)
+
+  def schedule_silence(%Step{} = s) do
+    {_ref, s} = Step.send_after(s, :silence, 50, :ringing)
+    s
+  end
+end
+
+defmodule ExMachine.Integration.DelayedEventsTest.SelfResetServer do
+  @moduledoc false
+  use ExMachine.Server, statechart: ExMachine.Integration.DelayedEventsTest.SelfReset
+end
+
 defmodule ExMachine.Integration.DelayedEventsTest do
   use ExUnit.Case, async: false
 
@@ -136,6 +167,37 @@ defmodule ExMachine.Integration.DelayedEventsTest do
       # lands in :surprise. With the fix, the timer was never scheduled.
       refute_receive {:ex_machine, :transition, _}, 100
       assert RaceServer.get_snapshot(pid).atomic_states == [:b]
+    end
+  end
+
+  describe "regression: bug_003 (3rd pass) — self-transition arms its timer" do
+    test "an external self-transition's new on_entry schedules a delayed send" do
+      alias ExMachine.Integration.DelayedEventsTest.SelfResetServer
+
+      {:ok, pid} = SelfResetServer.start_link()
+
+      on_exit(fn ->
+        try do
+          if Process.alive?(pid), do: GenServer.stop(pid, :normal, 100)
+        catch
+          :exit, _ -> :ok
+        end
+      end)
+
+      SelfResetServer.subscribe(pid)
+
+      # init macrostep: enter :ringing, schedule first :silence in 50ms.
+      assert SelfResetServer.get_snapshot(pid).atomic_states == [:ringing]
+
+      # Reset before the timer fires. External self-transition exits and
+      # re-enters :ringing in the same macrostep; the new on_entry must
+      # arm a fresh timer. With the bug, neither timer fires and the
+      # machine sits in :ringing forever.
+      {:ok, _} = SelfResetServer.call_event(pid, :reset)
+      assert SelfResetServer.get_snapshot(pid).atomic_states == [:ringing]
+
+      # The fresh timer must fire and the machine must reach :silenced.
+      assert_receive {:ex_machine, :transition, %{atomic_states: [:silenced]}}, 200
     end
   end
 end
