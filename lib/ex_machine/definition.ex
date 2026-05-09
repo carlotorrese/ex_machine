@@ -80,6 +80,7 @@ defmodule ExMachine.Definition do
     |> check_history_placement!()
     |> check_choice_branches!()
     |> check_transition_targets!()
+    |> check_no_root_source_transitions!()
   end
 
   @doc "Fetch a node by id, raising if missing."
@@ -263,5 +264,24 @@ defmodule ExMachine.Definition do
     end
 
     def_
+  end
+
+  # The DSL imports `on/2` at module scope, so a user can accidentally
+  # write a transition outside any `state`/`parallel` block. The builder
+  # then attaches it to the root, which the engine cannot route (LCCA
+  # would need to walk above the root). Reject it at compile time with
+  # a clear suggestion. See bug_006 in the M9 ultrareview.
+  defp check_no_root_source_transitions!(%Definition{root: root, nodes: nodes} = def_) do
+    case Map.fetch!(nodes, root).transitions do
+      [] ->
+        def_
+
+      [%Transition{} = first | _] ->
+        raise Error,
+              "root state #{inspect(root)} cannot be the source of a transition " <>
+                "(found one targeting #{inspect(first.target)} on event " <>
+                "#{inspect(first.event)}); declare the `on/2` inside a " <>
+                "wrapping `state ... do ... end` block, not at the top level"
+    end
   end
 end

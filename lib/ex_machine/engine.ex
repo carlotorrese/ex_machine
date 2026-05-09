@@ -410,8 +410,10 @@ defmodule ExMachine.Engine do
 
   # Least Common Compound Ancestor for an external transition: the deepest
   # proper ancestor of `source` that also has `target` as a descendant (or
-  # equals `target`'s ancestor list). Returns `nil` only if either is the
-  # root and the other is the root itself, which the validator rejects.
+  # equals `target`'s ancestor list). The `nil` case is unreachable for
+  # any definition that passes `Definition.validate!/1`: every transition's
+  # source has at least one ancestor (root-source transitions are
+  # rejected at compile time, see Definition.check_no_root_source_transitions!/1).
   defp lcca_external(def_, source, target) do
     source_ancestors = Definition.ancestors(def_, source)
 
@@ -419,7 +421,8 @@ defmodule ExMachine.Engine do
       target == ancestor or
         MapSet.member?(Definition.descendants(def_, ancestor), target)
     end) ||
-      raise "could not compute LCCA for #{inspect(source)} → #{inspect(target)}; this is a bug"
+      raise "could not compute LCCA for #{inspect(source)} → #{inspect(target)}; " <>
+              "the definition should have been rejected by Definition.validate!/1"
   end
 
   # All currently-active descendants of `lcca`, sorted deepest-first

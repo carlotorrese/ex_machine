@@ -118,6 +118,19 @@ defmodule ExMachine.DefinitionTest do
       end
     end
 
+    test "regression bug_006: rejects a transition whose source is the root" do
+      assert_raise Definition.Error, ~r/root state :root cannot be the source/, fn ->
+        build_invalid([
+          StateNode.new(:root, :compound,
+            initial: :a,
+            substates: [:a],
+            transitions: [Transition.new(source: :root, event: :reset, target: :a)]
+          ),
+          StateNode.new(:a, :atomic, parent: :root)
+        ])
+      end
+    end
+
     test "raises on choice with no branches" do
       assert_raise Definition.Error, ~r/at least one branch/, fn ->
         build_invalid([
