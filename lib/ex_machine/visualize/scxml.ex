@@ -17,9 +17,13 @@ defmodule ExMachine.Visualize.Scxml do
     * **history** — `<history id="..." type="shallow|deep">` with a
       `<transition target="default"/>` if a default substate is
       declared.
-    * **choice** — emitted as a comment (SCXML has no choice
-      pseudostate; idiomatic SCXML uses guarded transitions on the
-      source state instead).
+    * **choice** — emitted as a stub `<state id="..."/>` so transitions
+      targeting it resolve and the document stays XSD-valid (preceded
+      by an explanatory comment). SCXML has no choice pseudostate;
+      idiomatic SCXML uses guarded `<transition cond="...">` on the
+      source state. Since Elixir guard captures cannot round-trip
+      through XML, the user must rewrite the branches by hand for
+      true SCXML semantics.
     * **transition** — `<transition event="..." target="..."
       type="external|internal"/>`. Guards and actions are not
       surfaced (their Elixir captures cannot round-trip through XML).
@@ -122,8 +126,22 @@ defmodule ExMachine.Visualize.Scxml do
     [open] ++ inner ++ [close]
   end
 
+  # SCXML core has no choice pseudostate; the idiomatic equivalent is
+  # multiple guarded `<transition cond="...">` on the source. We can't
+  # round-trip the Elixir guard captures through XML, so we render the
+  # choice as a stub `<state>` (preceded by an explanatory comment) so
+  # transitions targeting it still resolve and the document remains
+  # XSD-valid. Users who need true SCXML semantics must rewrite the
+  # branches by hand on the source state.
   defp render_node(%StateNode{kind: :choice} = node, _def_, level) do
-    [indent(level, "<!-- choice #{name(node.id)} omitted: not part of SCXML core -->")]
+    [
+      indent(
+        level,
+        "<!-- choice #{name(node.id)} rendered as stub state; " <>
+          "rewrite as guarded <transition cond=\"...\"> for SCXML semantics -->"
+      ),
+      indent(level, ~s(<state id="#{name(node.id)}"/>))
+    ]
   end
 
   defp render_node(%StateNode{kind: :compound} = node, def_, level) do

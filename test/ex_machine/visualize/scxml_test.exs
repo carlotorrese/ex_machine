@@ -81,6 +81,31 @@ defmodule ExMachine.Visualize.ScxmlTest.HistoryNoDefault do
   end
 end
 
+defmodule ExMachine.Visualize.ScxmlTest.WithChoice do
+  @moduledoc false
+  # Regression for the third-pass bug_005: a transition targeting a
+  # choice pseudostate must resolve in the rendered XML — i.e. an
+  # element with that id must be present. SCXML core has no choice;
+  # the renderer emits a stub <state id="..."/> so the document stays
+  # XSD-valid even though the choice's semantics are not preserved.
+
+  use ExMachine.Statechart
+
+  initial(:start)
+
+  state(:start, do: on(:decide, target: :router))
+
+  choice :router do
+    cond_branch(&__MODULE__.allow?/1, target: :allowed)
+    otherwise(target: :denied)
+  end
+
+  state(:allowed)
+  state(:denied)
+
+  def allow?(_), do: true
+end
+
 defmodule ExMachine.Visualize.ScxmlTest.AmpEvent do
   @moduledoc false
   # Regression for bug_004: an event atom containing an XML
@@ -121,6 +146,7 @@ defmodule ExMachine.Visualize.ScxmlTest do
     HistoryNoDefault,
     Nested,
     ParallelRoot,
+    WithChoice,
     WithHistory,
     Workflow
   }
@@ -176,6 +202,21 @@ defmodule ExMachine.Visualize.ScxmlTest do
       out = Visualize.to_scxml(AmpEvent)
       assert out =~ ~s(event="a&amp;b")
       refute out =~ ~s(event="a&b")
+    end
+  end
+
+  describe "regression: bug_005 (3rd pass) — choice cross-references resolve" do
+    test "choice renders as a stub <state> so transitions targeting it resolve" do
+      out = Visualize.to_scxml(WithChoice)
+
+      # The :decide transition targets :router (a :choice).
+      assert out =~ ~s(<transition event="decide" target="router"/>)
+      # Without the fix, no element carried id="router"; XSD validators
+      # rejected the document. Stub <state id="router"/> restores
+      # cross-reference validity.
+      assert out =~ ~s(<state id="router"/>)
+      # The explanatory comment is still emitted.
+      assert out =~ "choice router rendered as stub"
     end
   end
 
