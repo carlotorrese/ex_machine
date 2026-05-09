@@ -42,7 +42,15 @@ defmodule ExMachine.ServerTest do
 
   setup do
     {:ok, pid} = LightServer.start_link()
-    on_exit(fn -> if Process.alive?(pid), do: LightServer.stop(pid) end)
+
+    on_exit(fn ->
+      try do
+        if Process.alive?(pid), do: GenServer.stop(pid, :normal, 100)
+      catch
+        :exit, _ -> :ok
+      end
+    end)
+
     {:ok, server: pid}
   end
 

@@ -53,8 +53,9 @@ defmodule ExMachine.Step do
   @type ref :: reference()
   @type event :: atom() | {atom(), term()} | nil
   @type delayed_entry :: {ref(), event(), pos_integer(), atom()}
-  @type invoke_spec :: mfa() | (Step.t() -> term())
-  @type invoke_entry :: {ref(), invoke_spec(), atom()}
+  @type invoke_id :: atom()
+  @type invoke_spec :: mfa() | (-> term())
+  @type invoke_entry :: {invoke_id(), invoke_spec(), atom()}
 
   @type t :: %Step{
           context: term(),
@@ -153,20 +154,30 @@ defmodule ExMachine.Step do
   end
 
   @doc """
-  Request the engine to spawn an invoked service when entering this state.
+  Request the server to spawn an invoked service when this microstep
+  completes. `id` is the user-chosen identifier that:
 
-  `spec` may be an `{module, function, args}` triple or an arity-1 function
-  receiving the step. Honored only in server-mode (`ExMachine.Server`).
+    * appears in the `done.invoke.<id>` / `error.invoke.<id>` event the
+      server raises on completion (so the DSL can declare a transition
+      that listens for it);
+    * names the invocation for `cancel/2`.
+
+  `spec` may be an `{module, function, args}` triple or a zero-arity
+  function. Honored only in server-mode (`ExMachine.Server`); pure
+  callers see the entry in `machine.pending_invokes`.
   """
-  @spec invoke(t(), invoke_spec(), atom()) :: {ref(), t()}
-  def invoke(%Step{} = step, spec, owner_state) when is_atom(owner_state) do
-    ref = make_ref()
-    {ref, %{step | invokes: step.invokes ++ [{ref, spec, owner_state}]}}
+  @spec invoke(t(), invoke_id(), invoke_spec(), atom()) :: t()
+  def invoke(%Step{} = step, id, spec, owner_state)
+      when is_atom(id) and is_atom(owner_state) do
+    %{step | invokes: step.invokes ++ [{id, spec, owner_state}]}
   end
 
-  @doc "Cancel a previously scheduled delayed event or invocation by ref."
-  @spec cancel(t(), ref()) :: t()
-  def cancel(%Step{cancels: c} = step, ref) when is_reference(ref) do
-    %{step | cancels: c ++ [ref]}
+  @doc """
+  Cancel a previously scheduled delayed send (by `make_ref/0` ref returned
+  from `send_after/4`) or a running invocation (by its user-chosen id).
+  """
+  @spec cancel(t(), ref() | invoke_id()) :: t()
+  def cancel(%Step{cancels: c} = step, key) when is_reference(key) or is_atom(key) do
+    %{step | cancels: c ++ [key]}
   end
 end

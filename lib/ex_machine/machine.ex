@@ -25,9 +25,14 @@ defmodule ExMachine.Machine do
       the same macrostep (run-to-completion).
     * `:trace` — `ExMachine.Trace` of the latest macrostep. Reset at the
       start of each `dispatch/2`.
+    * `:pending_delayed` / `:pending_invokes` / `:pending_cancels` —
+      side-effect requests collected from `ExMachine.Step` helpers
+      (`send_after/4`, `invoke/3`, `cancel/2`) during the most recent
+      `init/1` or `dispatch/2`. Reset at the start of each dispatch.
+      Honored by `ExMachine.Server`; pure callers may ignore them.
   """
 
-  alias ExMachine.{Configuration, Definition, Trace}
+  alias ExMachine.{Configuration, Definition, Step, Trace}
 
   @type t :: %__MODULE__{
           definition: Definition.t(),
@@ -36,7 +41,10 @@ defmodule ExMachine.Machine do
           running?: boolean(),
           histories: %{atom() => MapSet.t(atom())},
           queue: [term()],
-          trace: Trace.t()
+          trace: Trace.t(),
+          pending_delayed: [Step.delayed_entry()],
+          pending_invokes: [Step.invoke_entry()],
+          pending_cancels: [Step.ref()]
         }
 
   @enforce_keys [:definition]
@@ -46,7 +54,10 @@ defmodule ExMachine.Machine do
             running?: false,
             histories: %{},
             queue: [],
-            trace: nil
+            trace: nil,
+            pending_delayed: [],
+            pending_invokes: [],
+            pending_cancels: []
 
   defmodule NotRunning do
     defexception message: "machine is not running (a top-level final has been entered)"

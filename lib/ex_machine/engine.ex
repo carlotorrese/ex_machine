@@ -86,7 +86,10 @@ defmodule ExMachine.Engine do
           context: step.context,
           running?: not stopped?(def_, config),
           queue: machine.queue ++ step.raised,
-          trace: trace
+          trace: trace,
+          pending_delayed: step.delayed,
+          pending_invokes: step.invokes,
+          pending_cancels: step.cancels
       }
 
     run_to_completion(machine)
@@ -104,7 +107,13 @@ defmodule ExMachine.Engine do
   def dispatch(%Machine{running?: false}, _event), do: raise(Machine.NotRunning)
 
   def dispatch(%Machine{} = machine, event) do
-    machine = %{machine | trace: Trace.new(event)}
+    machine = %{
+      machine
+      | trace: Trace.new(event),
+        pending_delayed: [],
+        pending_invokes: [],
+        pending_cancels: []
+    }
 
     machine
     |> process_event(event)
@@ -314,7 +323,10 @@ defmodule ExMachine.Engine do
         histories: new_histories,
         queue: machine.queue ++ step.raised,
         trace: Trace.push(machine.trace, micro),
-        running?: not stopped?(def_, new_config)
+        running?: not stopped?(def_, new_config),
+        pending_delayed: machine.pending_delayed ++ step.delayed,
+        pending_invokes: machine.pending_invokes ++ step.invokes,
+        pending_cancels: machine.pending_cancels ++ step.cancels
     }
   end
 

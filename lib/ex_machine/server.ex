@@ -48,6 +48,27 @@ defmodule ExMachine.Server do
   snapshot, but refuses further events: `send_event/2` is silently
   dropped, `call_event/2` returns `{:error, :not_running}`. Use `stop/1`
   to terminate the process explicitly.
+
+  ## Delayed events and invoked services (M7)
+
+  Actions can request side effects via the `ExMachine.Step` helpers:
+
+    * `Step.send_after(step, event, ms, owner_state)` schedules `event`
+      to be re-dispatched to this server after `ms` milliseconds. The
+      timer is cancelled automatically when `owner_state` is exited or
+      when the returned ref is passed to `Step.cancel/2`.
+    * `Step.invoke(step, id, fun_or_mfa, owner_state)` spawns the
+      function under a per-server `Task.Supervisor`. On success the
+      server raises `done.invoke.<id>` with the function's return value
+      as event params; on failure, `error.invoke.<id>` with the crash
+      reason. The task is killed when `owner_state` is exited or when
+      `id` is passed to `Step.cancel/2`. Use a stable atom for `id` so
+      the DSL can declare a transition that listens for the event.
+
+  Both are honoured ONLY in server-mode; pure callers of
+  `ExMachine.dispatch/2` see the requests in
+  `machine.pending_delayed` / `pending_invokes` and may inspect or
+  ignore them.
   """
 
   use GenServer
@@ -55,6 +76,17 @@ defmodule ExMachine.Server do
   alias ExMachine.{Engine, Machine, Snapshot, Telemetry}
 
   @pubsub ExMachine.PubSub
+
+  defmodule State do
+    @moduledoc false
+    # Runtime state of an ExMachine.Server process.
+    defstruct [
+      :machine,
+      :task_supervisor,
+      timers: %{},
+      invocations: %{}
+    ]
+  end
 
   # ── __using__ ────────────────────────────────────────────────────────────
 
@@ -194,56 +226,216 @@ defmodule ExMachine.Server do
 
   @impl true
   def init({statechart, args}) do
+    Process.flag(:trap_exit, true)
     context = Keyword.get(args, :context)
+    {:ok, supervisor} = Task.Supervisor.start_link()
     machine = ExMachine.init(statechart, context)
+
+    state = %State{machine: machine, task_supervisor: supervisor}
+    state = process_side_effects(state, machine)
+
     publish_transition(self(), Snapshot.from_machine(machine))
     maybe_publish_stopped(self(), machine)
-    {:ok, machine}
+    {:ok, state}
   end
 
   @impl true
-  def handle_cast({:event, _event, _params}, %Machine{running?: false} = machine) do
-    {:noreply, machine}
+  def handle_cast({:event, _event, _params}, %State{machine: %Machine{running?: false}} = state) do
+    {:noreply, state}
   end
 
-  def handle_cast({:event, event, params}, %Machine{} = machine) do
-    {:noreply, dispatch_and_publish(machine, event, params)}
+  def handle_cast({:event, event, params}, %State{} = state) do
+    {:noreply, internal_dispatch(state, build_event(event, params))}
   end
 
   @impl true
-  def handle_call({:event, _event, _params}, _from, %Machine{running?: false} = machine) do
-    {:reply, {:error, :not_running}, machine}
+  def handle_call(
+        {:event, _event, _params},
+        _from,
+        %State{machine: %Machine{running?: false}} = s
+      ) do
+    {:reply, {:error, :not_running}, s}
   end
 
-  def handle_call({:event, event, params}, _from, %Machine{} = machine) do
-    new_machine = dispatch_and_publish(machine, event, params)
-    {:reply, {:ok, Snapshot.from_machine(new_machine)}, new_machine}
+  def handle_call({:event, event, params}, _from, %State{} = state) do
+    new_state = internal_dispatch(state, build_event(event, params))
+    {:reply, {:ok, Snapshot.from_machine(new_state.machine)}, new_state}
   end
 
-  def handle_call(:get_configuration, _from, machine),
-    do: {:reply, machine.configuration, machine}
+  def handle_call(:get_configuration, _from, %State{machine: m} = s),
+    do: {:reply, m.configuration, s}
 
-  def handle_call(:get_context, _from, machine), do: {:reply, machine.context, machine}
+  def handle_call(:get_context, _from, %State{machine: m} = s), do: {:reply, m.context, s}
 
-  def handle_call(:get_snapshot, _from, machine),
-    do: {:reply, Snapshot.from_machine(machine), machine}
+  def handle_call(:get_snapshot, _from, %State{machine: m} = s),
+    do: {:reply, Snapshot.from_machine(m), s}
 
-  # ── Internal ─────────────────────────────────────────────────────────────
+  # ── handle_info: timers and tasks ────────────────────────────────────────
 
-  defp dispatch_and_publish(%Machine{} = machine, event, params) do
-    payload = build_event(event, params)
+  @impl true
+  def handle_info({:ex_machine_timer, ref, event}, %State{} = state) do
+    case Map.pop(state.timers, ref) do
+      {nil, _} ->
+        {:noreply, state}
+
+      {_entry, timers} ->
+        state = %{state | timers: timers}
+
+        if state.machine.running? do
+          {:noreply, internal_dispatch(state, event)}
+        else
+          {:noreply, state}
+        end
+    end
+  end
+
+  def handle_info({task_ref, result}, %State{} = state) when is_reference(task_ref) do
+    case Map.pop(state.invocations, task_ref) do
+      {nil, _} ->
+        {:noreply, state}
+
+      {{id, _owner, _pid}, invocations} ->
+        Process.demonitor(task_ref, [:flush])
+        state = %{state | invocations: invocations}
+
+        if state.machine.running? do
+          {:noreply, internal_dispatch(state, {invoke_done_event(id), result})}
+        else
+          {:noreply, state}
+        end
+    end
+  end
+
+  def handle_info({:DOWN, ref, :process, _pid, reason}, %State{} = state)
+      when is_reference(ref) do
+    case Map.pop(state.invocations, ref) do
+      {nil, _} ->
+        {:noreply, state}
+
+      {{id, _owner, _pid}, invocations} ->
+        state = %{state | invocations: invocations}
+
+        if state.machine.running? do
+          {:noreply, internal_dispatch(state, {invoke_error_event(id), reason})}
+        else
+          {:noreply, state}
+        end
+    end
+  end
+
+  def handle_info(_, state), do: {:noreply, state}
+
+  @impl true
+  def terminate(_reason, %State{} = state) do
+    cancel_all_timers(state)
+    :ok
+  end
+
+  # ── Internal dispatch + side effects ─────────────────────────────────────
+
+  defp internal_dispatch(%State{} = state, event) do
     server = self()
-    metadata = %{server: server, event: payload}
+    metadata = %{server: server, event: event}
 
     new_machine =
       Telemetry.macrostep(metadata, fn ->
-        Engine.dispatch(machine, payload)
+        Engine.dispatch(state.machine, event)
       end)
 
-    snapshot = Snapshot.from_machine(new_machine)
-    publish_transition(server, snapshot)
+    state = %{state | machine: new_machine}
+    state = process_side_effects(state, new_machine)
+
+    publish_transition(server, Snapshot.from_machine(new_machine))
     maybe_publish_stopped(server, new_machine)
-    new_machine
+    state
+  end
+
+  # Apply the side-effect requests (delayed events, invocations,
+  # cancellations) accumulated during the most recent init/dispatch, plus
+  # auto-cancel any timer/task whose owner state was exited.
+  defp process_side_effects(%State{} = state, %Machine{} = machine) do
+    state
+    |> apply_explicit_cancels(machine.pending_cancels)
+    |> auto_cancel_on_exit(machine.trace)
+    |> schedule_delayed(machine.pending_delayed)
+    |> spawn_invocations(machine.pending_invokes)
+  end
+
+  defp apply_explicit_cancels(%State{} = state, []), do: state
+
+  defp apply_explicit_cancels(%State{} = state, keys) do
+    keys = MapSet.new(keys)
+
+    state
+    |> drop_timers(fn ref -> MapSet.member?(keys, ref) end)
+    |> drop_invocations(fn id -> MapSet.member?(keys, id) end)
+  end
+
+  defp auto_cancel_on_exit(%State{} = state, %{exited: []}), do: state
+
+  defp auto_cancel_on_exit(%State{} = state, %{exited: exited}) do
+    exited_set = MapSet.new(exited)
+
+    state
+    |> drop_timers(fn _ref -> false end, exited_set)
+    |> drop_invocations(fn _ref -> false end, exited_set)
+  end
+
+  defp drop_timers(state, ref_pred, owner_set \\ MapSet.new()) do
+    {to_drop, to_keep} =
+      Enum.split_with(state.timers, fn {ref, {_timer_ref, owner, _ev}} ->
+        ref_pred.(ref) or MapSet.member?(owner_set, owner)
+      end)
+
+    Enum.each(to_drop, fn {_ref, {timer_ref, _o, _e}} -> Process.cancel_timer(timer_ref) end)
+    %{state | timers: Map.new(to_keep)}
+  end
+
+  defp drop_invocations(state, id_pred, owner_set \\ MapSet.new()) do
+    {to_drop, to_keep} =
+      Enum.split_with(state.invocations, fn {_task_ref, {id, owner, _pid}} ->
+        id_pred.(id) or MapSet.member?(owner_set, owner)
+      end)
+
+    Enum.each(to_drop, fn {task_ref, {_id, _owner, pid}} ->
+      Process.demonitor(task_ref, [:flush])
+      Process.exit(pid, :kill)
+    end)
+
+    %{state | invocations: Map.new(to_keep)}
+  end
+
+  defp schedule_delayed(%State{} = state, []), do: state
+
+  defp schedule_delayed(%State{} = state, entries) do
+    Enum.reduce(entries, state, fn {ref, event, ms, owner}, acc ->
+      timer_ref = Process.send_after(self(), {:ex_machine_timer, ref, event}, ms)
+      %{acc | timers: Map.put(acc.timers, ref, {timer_ref, owner, event})}
+    end)
+  end
+
+  defp spawn_invocations(%State{} = state, []), do: state
+
+  defp spawn_invocations(%State{} = state, entries) do
+    Enum.reduce(entries, state, fn {id, spec, owner}, acc ->
+      task = Task.Supervisor.async_nolink(acc.task_supervisor, fn -> run_invoke(spec) end)
+      %{acc | invocations: Map.put(acc.invocations, task.ref, {id, owner, task.pid})}
+    end)
+  end
+
+  defp run_invoke({m, f, a}) when is_atom(m) and is_atom(f) and is_list(a), do: apply(m, f, a)
+  defp run_invoke(fun) when is_function(fun, 0), do: fun.()
+
+  defp cancel_all_timers(%State{timers: timers}) do
+    Enum.each(timers, fn {_ref, {timer_ref, _o, _e}} -> Process.cancel_timer(timer_ref) end)
+  end
+
+  defp invoke_done_event(id) when is_atom(id) do
+    String.to_atom("done.invoke." <> Atom.to_string(id))
+  end
+
+  defp invoke_error_event(id) when is_atom(id) do
+    String.to_atom("error.invoke." <> Atom.to_string(id))
   end
 
   defp build_event(event, nil), do: event

@@ -55,20 +55,24 @@ defmodule ExMachine.StepTest do
     end
   end
 
-  describe "invoke/3" do
-    test "stores invocation spec" do
+  describe "invoke/4" do
+    test "stores invocation spec under user-chosen id" do
       spec = {Kernel, :+, [1, 2]}
-      {ref, step} = Step.invoke(Step.new(%{}), spec, :running)
-      assert is_reference(ref)
-      assert [{^ref, ^spec, :running}] = step.invokes
+      step = Step.invoke(Step.new(%{}), :sum, spec, :running)
+      assert step.invokes == [{:sum, spec, :running}]
     end
   end
 
   describe "cancel/2" do
-    test "appends ref to cancels" do
+    test "appends a ref to cancels" do
       ref = make_ref()
       step = Step.new(%{}) |> Step.cancel(ref)
       assert step.cancels == [ref]
+    end
+
+    test "also accepts an invoke id (atom)" do
+      step = Step.new(%{}) |> Step.cancel(:sum)
+      assert step.cancels == [:sum]
     end
   end
 end
