@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0-alpha.1] - 2026-05-09
+
+A ground-up rewrite of the library. The 0.1.x API and storage shapes
+are gone; **there is no migration path**. Use a fresh dependency line
+and read the new guides under `guides/`.
+
+### Added
+
+- DSL (`use ExMachine.Statechart`) with compile-time validation:
+  `state`, `parallel`, `region`, `final`, `history`, `choice`,
+  `initial`, `initial_context`, `on`, `on_entry`, `on_exit`,
+  `cond_branch`, `otherwise`.
+- Pure-functional engine (`ExMachine.Engine`) implementing the SCXML
+  pure-execution subset:
+  - atomic, compound, parallel, region, final states;
+  - history pseudostates (shallow + deep) with auto-snapshot on exit
+    and restore-or-default on re-entry;
+  - choice pseudostates with recursive resolution and `:otherwise`
+    fallback;
+  - internal vs external transitions (proper LCCA handling);
+  - eventless ("always") transitions, run-to-completion;
+  - `done.state.<id>` events with bubble-up across parallel regions.
+- Multi-transition microsteps with SCXML `remove_conflicting`
+  (deeper-source wins, document-order tie-break).
+- Server-mode (`use ExMachine.Server, statechart: Mod`) with
+  `start_link / send_event / call_event / get_configuration /
+  get_context / get_snapshot / subscribe / unsubscribe / stop`;
+  graceful behaviour on terminal configurations (server stays alive,
+  refuses events).
+- Delayed events (`Step.send_after/4`) and invoked services
+  (`Step.invoke/4`) with auto-cancellation when the owner state
+  exits, plus `Step.cancel/2` for explicit cancellation.
+- `:telemetry` events (`[:ex_machine, :macrostep, :start | :stop |
+  :exception]`, `[:ex_machine, :transition]`,
+  `[:ex_machine, :stopped]`) and an attachable
+  `ExMachine.Logger.attach/1`.
+- Pub/sub for snapshots via `ExMachine.PubSub` (Elixir `Registry`,
+  started automatically by the library's OTP application).
+- `ExMachine.Visualize.to_mermaid/2` (`stateDiagram-v2`) and
+  `to_scxml/2` (W3C SCXML XML) renderers.
+- Property tests over engine invariants (`test/property/`) and
+  W3C-SCXML conformance scenarios (`test/scxml/`).
+- Twelve topical guides under `guides/`.
+
+### Removed
+
+- The entire 0.1.x module surface (`ExMachine.State`, `ExMachine.Final`,
+  `ExMachine.History`, `ExMachine.Context`, `ExMachine.Macrostep`,
+  `ExMachine.Microstep`, `ExMachine.ServerMachine`). They are gone,
+  not deprecated.
+
 ## [0.1.3] - 2025-06-09
 
 ### Added

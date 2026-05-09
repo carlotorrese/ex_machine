@@ -60,7 +60,7 @@ defmodule ExMachine.MixProject do
   defp package do
     [
       name: "ex_machine",
-      files: ~w(lib mix.exs README* CHANGELOG* LICENSE*),
+      files: ~w(lib mix.exs README* CHANGELOG* LICENSE* guides),
       licenses: ["MIT"],
       links: %{
         "GitHub" => @source_url,
@@ -73,11 +73,13 @@ defmodule ExMachine.MixProject do
   defp docs do
     [
       main: "readme",
-      extras: [
-        "README.md",
-        "CHANGELOG.md",
-        "LICENSE"
-      ],
+      extras:
+        [
+          "README.md",
+          "CHANGELOG.md",
+          "LICENSE"
+        ] ++ Path.wildcard("guides/*.md"),
+      groups_for_extras: [Guides: ~r"^guides/"],
       source_ref: "v#{@version}",
       source_url: @source_url
     ]
