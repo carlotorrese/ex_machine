@@ -6,13 +6,14 @@ defmodule ExMachine.Engine do
   in itself: every public function takes a `Machine` value and returns a new
   one, never reading or writing process dictionary or globals.
 
-  ## Algorithm overview (M3 subset)
+  ## Algorithm overview (M3 + M4 subset)
 
-  Milestone M3 supports atomic, compound, and final states with event-driven
-  and eventless transitions, run-to-completion, and `done.state.<id>` events.
-  History pseudostates, choice pseudostates, parallel regions, and internal
-  transitions arrive in M4 and M5; their data is already validated by the
-  DSL but the engine raises if asked to execute them.
+  Milestones M3-M4 support atomic, compound, and final states with
+  event-driven and eventless transitions, run-to-completion,
+  `done.state.<id>` events, internal transitions, choice and history
+  pseudostates. Parallel regions arrive in M5; their structural data is
+  already validated by the DSL but the engine raises if asked to execute
+  a parallel substate.
 
   ### Run-to-completion (`run_to_completion/1`)
 
@@ -206,35 +207,23 @@ defmodule ExMachine.Engine do
     }
   end
 
-  defp microstep(_machine, source, %Transition{type: :internal}, _event) do
-    raise "internal transitions are not supported in M3 (source=#{inspect(source)}); coming in M4"
-  end
-
   defp microstep(machine, source, %Transition{} = transition, event) do
-    %Machine{definition: def_, configuration: config} = machine
-    target = transition.target
+    %Machine{definition: def_, configuration: config, context: ctx, histories: histories} =
+      machine
 
-    case Definition.fetch!(def_, target).kind do
-      kind when kind in [:choice, :history] ->
-        raise "transition target #{inspect(target)} of kind #{kind} is not supported in M3 (coming in M4)"
+    target = resolve_choice(def_, transition.target, ctx)
 
-      _ ->
-        :ok
-    end
+    {exit_chain, entry_chain} =
+      compute_microstep_sets(def_, config, histories, source, transition, target)
 
-    lcca = lcca_external(def_, source, target)
-    exit_chain = compute_exit_chain(def_, config, lcca)
-    entry_chain = compute_entry_chain(def_, lcca, target)
+    new_histories = record_histories(def_, exit_chain, config, histories)
 
     step =
-      machine.context
+      ctx
       |> Step.new(event)
       |> apply_actions(exit_actions(def_, exit_chain))
       |> apply_action(transition.action)
       |> apply_actions(entry_actions(def_, entry_chain))
-
-    # Ensure init/1 also benefits from the same pipe order. (apply_action takes
-    # `step` first, returning a step; apply_actions same.)
 
     new_config =
       config
@@ -254,13 +243,68 @@ defmodule ExMachine.Engine do
       machine
       | configuration: new_config,
         context: step.context,
+        histories: new_histories,
         queue: machine.queue ++ step.raised,
         trace: Trace.push(machine.trace, micro),
         running?: not stopped_after_entering?(def_, entry_chain)
     }
   end
 
+  # Compute the (exit_chain, entry_chain) for a microstep, branching on
+  # transition kind (external | internal) and on whether the resolved target
+  # is a history pseudostate.
+  defp compute_microstep_sets(def_, config, histories, source, transition, target) do
+    case Definition.fetch!(def_, target).kind do
+      :history ->
+        compute_history_sets(def_, config, histories, source, target)
+
+      _ ->
+        lcca = compute_lcca(def_, source, target, transition.type)
+        {compute_exit_chain(def_, config, lcca), compute_entry_chain(def_, lcca, target)}
+    end
+  end
+
+  # Entering a history pseudostate restores the recorded sub-configuration
+  # of its parent. The LCCA is computed against the parent (not the
+  # pseudostate, which is never present in a configuration).
+  defp compute_history_sets(def_, config, histories, source, hist_id) do
+    hist_node = Definition.fetch!(def_, hist_id)
+    parent_id = hist_node.parent
+    lcca = lcca_external(def_, source, parent_id)
+    exit_chain = compute_exit_chain(def_, config, lcca)
+
+    parent_chain =
+      parent_id
+      |> ancestors_until(def_, lcca)
+      |> Enum.reverse()
+      |> Kernel.++([parent_id])
+
+    restore_chain = history_restore_chain(def_, hist_node, histories)
+    {exit_chain, parent_chain ++ restore_chain}
+  end
+
   # ── LCCA & set computation ────────────────────────────────────────────────
+
+  # LCCA for a transition. For an external transition, this is the deepest
+  # proper ancestor of `source` that also has `target` as a descendant.
+  #
+  # For an internal transition where the source is a composite and the target
+  # is one of its proper descendants, the LCCA is the source itself: the
+  # source must NOT be exited and re-entered. Any other internal configuration
+  # (target outside source, source not a composite) degrades to external
+  # semantics, matching SCXML.
+  defp compute_lcca(def_, source, target, :internal) do
+    source_node = Definition.fetch!(def_, source)
+    descendants = Definition.descendants(def_, source)
+
+    if source_node.kind in [:compound, :region] and MapSet.member?(descendants, target) do
+      source
+    else
+      lcca_external(def_, source, target)
+    end
+  end
+
+  defp compute_lcca(def_, source, target, :external), do: lcca_external(def_, source, target)
 
   # Least Common Compound Ancestor for an external transition: the deepest
   # proper ancestor of `source` that also has `target` as a descendant (or
@@ -321,6 +365,126 @@ defmodule ExMachine.Engine do
 
   defp apply_action(step, nil), do: step
   defp apply_action(step, fun) when is_function(fun, 1), do: fun.(step)
+
+  # ── Choice resolution ────────────────────────────────────────────────────
+
+  # Resolve a target id through any number of `:choice` pseudostates. The
+  # first branch whose guard returns `true` wins; an `:otherwise` branch is
+  # encoded as `{nil, target}`. Recursion lets a choice point at another
+  # choice. Raises if no branch matches and no `:otherwise` is declared.
+  defp resolve_choice(_def, nil, _ctx), do: nil
+
+  defp resolve_choice(def_, target, ctx) do
+    case Definition.fetch!(def_, target) do
+      %{kind: :choice} = node ->
+        next = pick_choice_branch(node, ctx)
+        resolve_choice(def_, next, ctx)
+
+      _ ->
+        target
+    end
+  end
+
+  defp pick_choice_branch(%{id: id, choice_branches: branches}, ctx) do
+    branch =
+      Enum.find(branches, fn
+        {nil, _t} -> true
+        {guard, _t} when is_function(guard, 1) -> guard.(ctx) == true
+      end)
+
+    case branch do
+      nil ->
+        raise "choice #{inspect(id)} has no matching branch and no :otherwise default"
+
+      {_guard, target} ->
+        target
+    end
+  end
+
+  # ── History recording & restoration ──────────────────────────────────────
+
+  # For every composite (compound or region) about to be exited that has at
+  # least one history child, snapshot the relevant sub-configuration so that
+  # a future entry through the history pseudostate restores it.
+  defp record_histories(def_, exit_chain, old_config, histories) do
+    Enum.reduce(exit_chain, histories, fn id, acc ->
+      node = Definition.fetch!(def_, id)
+
+      case node.kind do
+        kind when kind in [:compound, :region] ->
+          node
+          |> history_children(def_)
+          |> Enum.reduce(acc, fn hist, acc2 ->
+            Map.put(acc2, hist.id, history_snapshot(def_, node, hist, old_config))
+          end)
+
+        _ ->
+          acc
+      end
+    end)
+  end
+
+  defp history_children(node, def_) do
+    Enum.flat_map(node.substates, fn sub_id ->
+      sub = Definition.fetch!(def_, sub_id)
+      if sub.kind == :history, do: [sub], else: []
+    end)
+  end
+
+  # Shallow: which direct children of the parent were active.
+  # Deep: which atomic descendants were active.
+  defp history_snapshot(_def, parent, %{history_type: :shallow}, old_config) do
+    MapSet.intersection(old_config, MapSet.new(parent.substates))
+  end
+
+  defp history_snapshot(def_, parent, %{history_type: :deep}, old_config) do
+    descendants = Definition.descendants(def_, parent.id)
+
+    descendants
+    |> MapSet.intersection(old_config)
+    |> Enum.filter(fn id -> Definition.fetch!(def_, id).kind in [:atomic, :final] end)
+    |> MapSet.new()
+  end
+
+  # Build the entry chain to add AFTER the parent has been entered, given a
+  # history pseudostate. Falls back to `history_default` (or the parent's
+  # `:initial`) when there is no recorded snapshot yet.
+  defp history_restore_chain(def_, %{id: id} = hist, histories) do
+    case Map.get(histories, id) do
+      nil -> default_restore_chain(def_, hist)
+      snapshot -> snapshot_restore_chain(def_, hist, snapshot)
+    end
+  end
+
+  defp default_restore_chain(def_, %{history_default: nil, parent: parent_id}) do
+    parent = Definition.fetch!(def_, parent_id)
+    Configuration.initial_chain(def_, parent.initial)
+  end
+
+  defp default_restore_chain(def_, %{history_default: default}) do
+    Configuration.initial_chain(def_, default)
+  end
+
+  defp snapshot_restore_chain(def_, %{history_type: :shallow}, snapshot) do
+    snapshot
+    |> Enum.sort()
+    |> Enum.flat_map(&Configuration.initial_chain(def_, &1))
+  end
+
+  defp snapshot_restore_chain(def_, %{history_type: :deep, parent: parent_id}, snapshot) do
+    snapshot
+    |> Enum.sort()
+    |> Enum.flat_map(fn leaf ->
+      ancestor_chain =
+        def_
+        |> Definition.ancestors(leaf)
+        |> Enum.take_while(&(&1 != parent_id))
+        |> Enum.reverse()
+
+      ancestor_chain ++ [leaf]
+    end)
+    |> Enum.uniq()
+  end
 
   # ── Final detection & done events ────────────────────────────────────────
 

@@ -77,10 +77,9 @@ test/ex_machine/
 - **`mix.exs` version is single-source via the `@version` module attribute.**
   Don't duplicate the literal in `docs[:source_ref]` or anywhere else.
 
-- **Engine M3 deliberately raises** for `:history`/`:choice` transition
-  targets and for `type: :internal`. The DSL accepts these (validated at
-  compile time) but the engine refuses to execute them until M4. If you
-  encounter a "coming in M4" runtime error, that's expected.
+- **Engine raises** when asked to enter a `:parallel` substate or to
+  cross regions. Parallel arrives in M5. History, choice, and internal
+  transitions are live since M4.
 
 ## Milestone commit convention
 
