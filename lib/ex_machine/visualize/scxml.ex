@@ -33,34 +33,57 @@ defmodule ExMachine.Visualize.Scxml do
   @spec render(Definition.t(), keyword()) :: String.t()
   def render(%Definition{} = def_, _opts \\ []) do
     root = Definition.fetch!(def_, def_.root)
+    open = root_open_tag(root)
+    body = render_root_body(root, def_)
+    Enum.join([~s(<?xml version="1.0" encoding="UTF-8"?>), open] ++ body ++ ["</scxml>"], "\n")
+  end
 
+  # The <scxml> opening tag. For a parallel root we point `initial=` at
+  # the wrapping <parallel> so a conformant interpreter activates the
+  # whole parallel (rather than treating the regions as a compound and
+  # picking only the first).
+  defp root_open_tag(%StateNode{kind: :parallel} = root) do
+    ~s(<scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0") <>
+      ~s( initial="#{name(root.id)}") <>
+      ~s( name="#{name(root.id)}">)
+  end
+
+  defp root_open_tag(%StateNode{} = root) do
     initial_attr =
       case root.initial do
         nil -> ""
         id -> ~s( initial="#{name(id)}")
       end
 
-    open =
-      ~s(<scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0") <>
-        initial_attr <> ~s( name="#{name(root.id)}">)
-
-    body = render_root_children(root, def_, 1)
-
-    Enum.join([~s(<?xml version="1.0" encoding="UTF-8"?>), open] ++ body ++ ["</scxml>"], "\n")
+    ~s(<scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0") <>
+      initial_attr <> ~s( name="#{name(root.id)}">)
   end
 
-  # ── Root children ────────────────────────────────────────────────────────
+  # ── Root body ───────────────────────────────────────────────────────────
 
-  defp render_root_children(%StateNode{kind: :compound} = root, def_, level) do
-    Enum.flat_map(root.substates, fn id ->
-      render_node(Definition.fetch!(def_, id), def_, level)
-    end)
+  # Compound root: substates and root-level transitions sit directly under
+  # <scxml>. Parallel root: wrap regions in <parallel id="..."> so the
+  # XML is structurally valid SCXML (bug_003).
+  defp render_root_body(%StateNode{kind: :parallel} = root, def_) do
+    regions =
+      Enum.flat_map(root.substates, fn id ->
+        render_node(Definition.fetch!(def_, id), def_, 2)
+      end)
+
+    transitions = Enum.map(root.transitions, &render_transition(&1, 2))
+
+    [indent(1, ~s(<parallel id="#{name(root.id)}">))] ++
+      regions ++ transitions ++ [indent(1, "</parallel>")]
   end
 
-  defp render_root_children(%StateNode{kind: :parallel} = root, def_, level) do
-    Enum.flat_map(root.substates, fn id ->
-      render_node(Definition.fetch!(def_, id), def_, level)
-    end)
+  defp render_root_body(%StateNode{} = root, def_) do
+    children =
+      Enum.flat_map(root.substates, fn id ->
+        render_node(Definition.fetch!(def_, id), def_, 1)
+      end)
+
+    transitions = Enum.map(root.transitions, &render_transition(&1, 1))
+    children ++ transitions
   end
 
   # ── Per-node rendering ───────────────────────────────────────────────────

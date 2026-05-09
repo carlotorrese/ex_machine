@@ -42,6 +42,26 @@ defmodule ExMachine.Visualize.ScxmlTest.Workflow do
   end
 end
 
+defmodule ExMachine.Visualize.ScxmlTest.ParallelRoot do
+  @moduledoc false
+  # Regression for bug_003: when the root is :parallel, the XML body
+  # must be wrapped in <parallel id=...> and the <scxml> element must
+  # carry initial=<root>, otherwise a conformant interpreter treats
+  # the regions as a compound and activates only the first.
+
+  use ExMachine.Statechart, type: :parallel
+
+  region :left do
+    initial(:l1)
+    state(:l1)
+  end
+
+  region :right do
+    initial(:r1)
+    state(:r1)
+  end
+end
+
 defmodule ExMachine.Visualize.ScxmlTest.WithHistory do
   @moduledoc false
   use ExMachine.Statechart
@@ -63,7 +83,7 @@ defmodule ExMachine.Visualize.ScxmlTest do
   use ExUnit.Case, async: true
 
   alias ExMachine.Visualize
-  alias ExMachine.Visualize.ScxmlTest.{Flat, Nested, WithHistory, Workflow}
+  alias ExMachine.Visualize.ScxmlTest.{Flat, Nested, ParallelRoot, WithHistory, Workflow}
 
   test "flat FSM emits a top-level <scxml initial=...> with one <state> per node" do
     out = Visualize.to_scxml(Flat)
@@ -97,5 +117,19 @@ defmodule ExMachine.Visualize.ScxmlTest do
     assert out =~ ~s(<history id="h" type="deep">)
     assert out =~ ~s(<transition target="fast"/>)
     assert out =~ "</history>"
+  end
+
+  describe "regression: bug_003 — parallel root wrapper" do
+    test "parallel root wraps regions in <parallel> and sets initial= on <scxml>" do
+      out = Visualize.to_scxml(ParallelRoot)
+
+      assert out =~
+               ~s(<scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" initial="parallel_root")
+
+      assert out =~ ~s(<parallel id="parallel_root">)
+      assert out =~ "</parallel>"
+      assert out =~ ~s(<state id="left" initial="l1">)
+      assert out =~ ~s(<state id="right" initial="r1">)
+    end
   end
 end

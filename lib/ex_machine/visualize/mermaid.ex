@@ -39,11 +39,11 @@ defmodule ExMachine.Visualize.Mermaid do
   # ── Root ─────────────────────────────────────────────────────────────────
 
   defp render_root(%StateNode{kind: :compound} = root, def_) do
-    render_compound_body(root, def_, 1)
+    render_compound_body(root, def_, 1) ++ render_transitions(root, def_, 1)
   end
 
   defp render_root(%StateNode{kind: :parallel} = root, def_) do
-    render_parallel_body(root, def_, 1)
+    render_parallel_body(root, def_, 1) ++ render_transitions(root, def_, 1)
   end
 
   # ── Bodies (the contents of a `state X { ... }` block) ───────────────────
