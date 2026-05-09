@@ -409,17 +409,22 @@ defmodule ExMachine.Engine do
   defp compute_lcca(def_, source, target, :external), do: lcca_external(def_, source, target)
 
   # Least Common Compound Ancestor for an external transition: the deepest
-  # proper ancestor of `source` that also has `target` as a descendant (or
-  # equals `target`'s ancestor list). The `nil` case is unreachable for
-  # any definition that passes `Definition.validate!/1`: every transition's
-  # source has at least one ancestor (root-source transitions are
-  # rejected at compile time, see Definition.check_no_root_source_transitions!/1).
+  # proper ancestor of `source` that also has `target` as a proper
+  # descendant. Per SCXML §3.13, the LCCA must have BOTH source AND target
+  # as descendants; in particular, the LCCA can never be the target itself
+  # (a state is not its own descendant), so we test descendant membership
+  # only. `Definition.descendants/2` returns strict descendants.
+  #
+  # The `nil` case is unreachable for any definition that passes
+  # `Definition.validate!/1`: every transition's source has at least one
+  # ancestor (root-source transitions are rejected at compile time, see
+  # Definition.check_no_root_source_transitions!/1), and every ancestor
+  # chain ultimately reaches the root which has every node as descendant.
   defp lcca_external(def_, source, target) do
     source_ancestors = Definition.ancestors(def_, source)
 
     Enum.find(source_ancestors, fn ancestor ->
-      target == ancestor or
-        MapSet.member?(Definition.descendants(def_, ancestor), target)
+      MapSet.member?(Definition.descendants(def_, ancestor), target)
     end) ||
       raise "could not compute LCCA for #{inspect(source)} → #{inspect(target)}; " <>
               "the definition should have been rejected by Definition.validate!/1"
@@ -674,11 +679,17 @@ defmodule ExMachine.Engine do
       Enum.all?(parent.substates, fn region_id -> region_done?(def_, region_id, config) end)
   end
 
-  # A region is done when it currently contains an active :final descendant.
+  # A region is done when one of its DIRECT substates is an active :final.
+  # Per SCXML §3.7 / §6.2 (`isInFinalState`), nested final states deeper
+  # under the region's substate hierarchy do NOT make the region done —
+  # they only emit `done.state.<their_compound>`. The user is expected to
+  # lift completion to a region-level :final via an explicit transition
+  # such as `on(:"done.state.<inner>", target: <region_final>)`.
   defp region_done?(def_, region_id, config) do
-    Definition.descendants(def_, region_id)
-    |> Enum.any?(fn d ->
-      MapSet.member?(config, d) and Definition.fetch!(def_, d).kind == :final
+    region = Definition.fetch!(def_, region_id)
+
+    Enum.any?(region.substates, fn s ->
+      MapSet.member?(config, s) and Definition.fetch!(def_, s).kind == :final
     end)
   end
 
